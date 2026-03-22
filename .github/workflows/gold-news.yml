@@ -3,7 +3,10 @@ name: Daily Gold News
 on:
   schedule:
     - cron: '0 23 * * *'   # 23:00 UTC = 06:00 Thailand (UTC+7)
-  workflow_dispatch:         # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   send-gold-news:
@@ -27,3 +30,11 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Commit news files to repo
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add GoldNews.txt GoldNewsMT5.txt
+          git diff --staged --quiet || git commit -m "Update gold news $(date +%Y-%m-%d)"
+          git push
