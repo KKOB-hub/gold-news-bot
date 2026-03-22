@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install google-generativeai requests
+        run: pip uninstall -y google-generativeai || true && pip install google-genai requests
 
       - name: Run Gold News Bot
         run: python gold_news.py
