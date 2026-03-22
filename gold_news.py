@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from datetime import datetime
 from google import genai
@@ -36,32 +37,52 @@ Bias วันนี้: 🟢 Bullish หรือ 🔴 Bearish หรือ ⚪
     return response.text.strip()
 
 
-def get_gold_news_mt5() -> str:
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    today = datetime.now().strftime("%Y-%m-%d")
+def make_mt5_summary(news: str, today: str) -> str:
+    """สร้าง MT5 short summary จาก full news โดยไม่ใช้ API เพิ่มเติม"""
+    lines = news.split("\n")
 
-    prompt = f"""Search the web for XAUUSD/Gold news from the last 1-2 days.
-Create SHORT summary for MT5 mobile push notifications.
-CRITICAL: Each line MUST be under 255 characters. Write in Thai. Output EXACTLY 7 lines, no more.
+    # หา Bias
+    bias = "⚪ Mixed"
+    for line in lines:
+        if "Bias วันนี้:" in line:
+            if "🟢" in line:
+                bias = "🟢 Bullish"
+            elif "🔴" in line:
+                bias = "🔴 Bearish"
+            break
 
-Line 1: "🌟 ทอง {today} Bias:[🟢Bullish/🔴Bearish/⚪Mixed]"
-Line 2: "1.[🟢/🔴/⚪] [ข่าว 1 สั้น + ผลต่อทอง]"
-Line 3: "2.[🟢/🔴/⚪] [ข่าว 2 สั้น + ผลต่อทอง]"
-Line 4: "3.[🟢/🔴/⚪] [ข่าว 3 สั้น + ผลต่อทอง]"
-Line 5: "4.[🟢/🔴/⚪] [ข่าว 4 สั้น + ผลต่อทอง]"
-Line 6: "5.[🟢/🔴/⚪] [ข่าว 5 สั้น + ผลต่อทอง]"
-Line 7: "📊 [สรุปทิศทาง 1 ประโยค]"
+    mt5_lines = [f"🌟 ทอง {today} | {bias}"]
 
-Output ONLY these 7 lines. No headers, no extra text."""
+    # หาหัวข้อข่าว 1-5 + ผลกระทบ
+    item_num = 0
+    i = 0
+    while i < len(lines) and item_num < 5:
+        line = lines[i].strip()
+        match = re.match(r"^(\d)\.\s+(.+)", line)
+        if match and int(match.group(1)) == item_num + 1:
+            item_num += 1
+            headline = match.group(2)[:80]
+            impact = "⚪"
+            # ดู impact จากบรรทัดถัดไป
+            for j in range(i + 1, min(i + 4, len(lines))):
+                if "ผลกระทบ:" in lines[j]:
+                    if "🟢" in lines[j]:
+                        impact = "🟢"
+                    elif "🔴" in lines[j]:
+                        impact = "🔴"
+                    break
+            mt5_lines.append(f"{item_num}.{impact} {headline}")
+        i += 1
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        ),
-    )
-    return response.text.strip()
+    # หาสรุปภาพรวม (ประโยคแรก)
+    for line in lines:
+        if "สรุปภาพรวม:" in line:
+            summary = line.replace("สรุปภาพรวม:", "").strip()
+            if summary:
+                mt5_lines.append(f"📊 {summary[:200]}")
+            break
+
+    return "\n".join(mt5_lines)
 
 
 def send_telegram(message: str, token: str, chat_id: str) -> None:
@@ -76,15 +97,16 @@ def send_telegram(message: str, token: str, chat_id: str) -> None:
 if __name__ == "__main__":
     token = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    print("Fetching full gold news...")
+    print("Fetching gold news...")
     news = get_gold_news()
-
-    print("Fetching MT5 short summary...")
-    news_mt5 = get_gold_news_mt5()
 
     print("Sending to Telegram...")
     send_telegram(news, token, chat_id)
+
+    print("Creating MT5 summary...")
+    news_mt5 = make_mt5_summary(news, today)
 
     print("Saving txt files...")
     with open("GoldNews.txt", "w", encoding="utf-8") as f:
