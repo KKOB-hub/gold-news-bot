@@ -4,11 +4,12 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.00"
+#property version     "2.01"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.01 | 2026-05-01 | LogTradeOpen: add Vol/AvgVol/RVol to Print log and mobile notification
 // v2.00 | 2026-05-01 | NR Mode4: remove Hull M15 filter — follow Hull M1 only (BUY+SELL hard check M1 only)
 // v1.99 | 2026-05-01 | SmartNR: fix RankTight→sliding pairs (match Pine), remove Setup Timeout, fix line extend forward, buffer 2000→5000
 // v1.97 | 2026-04-30 | Fibo filter: block if max(p26,fx) > fiboMaxPct for both BUY and SELL (fix conflicting Fibo source bypass)
