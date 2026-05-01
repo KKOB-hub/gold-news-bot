@@ -4,7 +4,7 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.009999"
+#property version     "2.00"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
