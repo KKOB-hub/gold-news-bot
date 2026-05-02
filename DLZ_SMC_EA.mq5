@@ -7,7 +7,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "DLZ SMC EA"
 #property version     "1.14"
-#property description "DLZ SMC EA -- Institutional Analysis Full Suite test"
+#property description "DLZ SMC EA -- Institutional Analysis Full Suite"
 #include <Trade\Trade.mqh>
 
 //--- Object name prefix (used for bulk cleanup)
