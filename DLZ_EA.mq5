@@ -4,11 +4,12 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.01"
+#property version     "2.02"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.02 | 2026-05-02 | Vol filter (NR Mode4+HFE): block if Vol < InpMinVolRatio×Avg | FiboP26 ceiling filter for NR BUY
 // v2.01 | 2026-05-01 | LogTradeOpen: add Vol/AvgVol/RVol to Print log and mobile notification
 // v2.00 | 2026-05-01 | NR Mode4: remove Hull M15 filter — follow Hull M1 only (BUY+SELL hard check M1 only)
 // v1.99 | 2026-05-01 | SmartNR: fix RankTight→sliding pairs (match Pine), remove Setup Timeout, fix line extend forward, buffer 2000→5000
@@ -206,6 +207,8 @@ input int    InpMaxEQLStreak   = 4;      // [Filter] Max EQL streak for BUY
 input int    InpMaxEQHStreak   = 4;      // [Filter] Max EQH streak for SELL
 input bool   InpMinGapEntryFilter = true;   // [Filter] Min Gap to opposite zone (block if too close)
 input double InpMinEntryGapUSD    = 3.0;    // [Filter] Min Gap (USD) — BUY block near EQH / SELL block near EQL
+input double InpMinVolRatio       = 0.01;   // [Filter] Min Vol ratio vs Avg — block if below (0=off) NR+HFE
+input double InpNR_MinFiboP26Buy  = 3.0;    // [NR Mode4] Min FiboP26% for BUY — block if price too near swing top
 input int    InpEQL_ConfirmMaxBars = 3;     // EQL Candle Confirm: max bars to wait for reject candle (0=instant)
 input int    InpEQH_ConfirmMaxBars = 3;     // EQH Candle Confirm: max bars to wait for reject candle (0=instant)
 
@@ -3391,6 +3394,18 @@ void CheckNRArrowEntry(int dir, datetime barTime, double barHigh, double barLow)
    double tpGap    = USDtoPriceGap(InpTP_USD);
    if(tpGap <= 0) { Print("[NR Mode4 DBG] blocked — tpGap<=0 (InpTP_USD too small?)"); return; }
    PrintFormat("[NR Mode4 DBG] reached filter | dir:%d p50Bull:%s hullM1:%d directEntry:%s", dir, (string)p50Bull, g_hullDirM1, (string)InpNR_DirectEntry);
+
+   // Vol filter (ทั้ง BUY และ SELL)
+   if(InpMinVolRatio > 0) {
+      double curVol  = (double)iTickVolume(_Symbol, _Period, 0);
+      double avgVol  = GetAvgVolume(InpRVolPeriod);
+      double volRatio = (avgVol > 0) ? curVol / avgVol : 0;
+      if(volRatio < InpMinVolRatio) {
+         PrintFormat("[NR Mode4] blocked — Vol too low (x%.2f < %.2f)", volRatio, InpMinVolRatio);
+         return;
+      }
+   }
+
    long   stopsLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDist  = (stopsLvl + 50) * _Point;
 
@@ -3399,6 +3414,14 @@ void CheckNRArrowEntry(int dir, datetime barTime, double barHigh, double barLow)
       if(g_hullDirM1  != 1) { Print("[NR Mode4] BUY blocked — Hull M1 DN (hard)"); return; }
       if(!InpNR_DirectEntry) {
          if(!p50Bull)         { Print("[NR Mode4] BUY blocked — p50 BEARISH"); return; }
+      }
+      // FiboP26 ceiling filter — block BUY if price too near swing top
+      if(InpNR_MinFiboP26Buy > 0 && (gdx_swingCount > 1 || gdx_swingCount2 > 1)) {
+         double fiboP26top = GetFiboP26Pct(SymbolInfoDouble(_Symbol, SYMBOL_ASK), false);
+         if(fiboP26top >= 0.0 && fiboP26top < InpNR_MinFiboP26Buy) {
+            PrintFormat("[NR Mode4] BUY blocked — FiboP26 too low (%.1f%% < %.1f%% ceiling)", fiboP26top, InpNR_MinFiboP26Buy);
+            return;
+         }
       }
       if(CountOpenOrders(POSITION_TYPE_BUY) >= InpMaxBuy) { Print("[NR Mode4] BUY blocked — max orders"); return; }
       if(InpFiboFilter && (gdx_swingCount > 1 || gdx_swingCount2 > 1)) {
@@ -5020,6 +5043,18 @@ void CheckHullFollowEntry()
             Print(StringFormat("[DLZ HFE|%s] BUY skipped — no EQL zone within %d pts (Nearest: %s pts) Sp:$%.3f",
                   triggerTag, prof.zoneProximityPts, distInfo, GetSpreadUSD()));
             buyOK = false;
+         }
+         if(buyOK) {
+            // Vol filter
+            if(InpMinVolRatio > 0) {
+               double hfe_curVol  = (double)iTickVolume(_Symbol, _Period, 0);
+               double hfe_avgVol  = GetAvgVolume(InpRVolPeriod);
+               double hfe_volRatio = (hfe_avgVol > 0) ? hfe_curVol / hfe_avgVol : 0;
+               if(hfe_volRatio < InpMinVolRatio) {
+                  PrintFormat("[DLZ HFE|%s] BUY blocked — Vol too low (x%.2f < %.2f)", triggerTag, hfe_volRatio, InpMinVolRatio);
+                  buyOK = false;
+               }
+            }
          }
          if(buyOK) {
             // Min Gap filter — block HFE BUY if too close to nearest EQH
