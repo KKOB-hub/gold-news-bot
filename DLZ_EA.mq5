@@ -4,11 +4,14 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.02"
+#property version     "2.05"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.05 | 2026-05-04 | Session VP Monitor: POC/VAH/VAL display per session (Asia/London/NY), reset daily 00:00 GMT
+// v2.04 | 2026-05-03 | VWAP display: replace OBJ_TREND segments with OBJ_HLINE + OBJ_LABEL (V11 style)
+// v2.03 | 2026-05-03 | Visual overlays: BOS/CHoCH lines, VWAP daily, FVG boxes (display only, no filter)
 // v2.02 | 2026-05-02 | Vol filter (NR Mode4+HFE): block if Vol < InpMinVolRatio×Avg | FiboP26 ceiling filter for NR BUY
 // v2.01 | 2026-05-01 | LogTradeOpen: add Vol/AvgVol/RVol to Print log and mobile notification
 // v2.00 | 2026-05-01 | NR Mode4: remove Hull M15 filter — follow Hull M1 only (BUY+SELL hard check M1 only)
@@ -31,48 +34,6 @@
 // v1.82 | 2026-04-28 | Disable NR MA flip close positions (NR_ARROW_SELL/BUY CLOSE_ALL removed)
 // v1.81 | 2026-04-28 | SmartNR overlap: align to Pine Script — check last pattern only, bar overlap only (remove Layer1/2/3)
 // v1.80 | 2026-04-28 | SmartNR cold-start: suppress box drawing via !wasColdStart in shouldDraw (no ObjectsDeleteAll)
-// v1.79 | 2026-04-28 | SmartNR cold-start: delete all NR chart objects after reload (overlap memory preserved)
-// v1.78 | 2026-04-28 | SmartNR Density Filter: bar buffer 5 bars + midpoint price buffer 50pts + strict price overlap
-// v1.77 | 2026-04-28 | NR MA flip DN→UP ปิด NR_ARROW_SELL; UP→DN ปิด NR_ARROW_BUY (magic+symbol+comment filter)
-// v1.76 | 2026-04-28 | SmartNR: วาด box/arrow เฉพาะ MaxKeep bars ล่าสุด; cold-start เก็บ active overlap memory
-// v1.75 | 2026-04-28 | SmartNR Mode4: both Round1+Round2 fire orders; Round1=gray arrow, Round2=white arrow
-// v1.74 | 2026-04-28 | SmartNR Mode4: 2-round confirmation — Round1=arrow only (gray), Round2=order+white arrow
-// v1.73 | 2026-04-28 | SmartNR Mode4: clear nr_patCnt after cold-start so historical patterns don't block live overlap check
-// v1.72 | 2026-04-28 | SmartNR NR_RankTight: fix rank logic (compare each hist bar vs fixed current, not sliding pairs)
-// v1.71 | 2026-04-28 | SmartNR NR_RankTight: initial fix attempt (partial)
-// v1.70 | 2026-04-27 | SmartNR notify: suppress historical patterns after EA reload (wasColdStart)
-// v1.69 | 2026-04-27 | Revert p50 Extension guard (v1.67) — ลบ [C] block BUY >100%
-// v1.68 | 2026-04-27 | SmartNR notify: fix rangeUSD × InpLot (was 100× inflated)
-// v1.67 | 2026-04-27 | DXY_AUTO BUY: block p50 Fibo > 100% (Extension zone guard)
-// v1.66 | 2026-04-27 | Raise BE defaults: TriggerUSD 1.0→3.0, BufferUSD 0.5→1.5
-// v1.65 | 2026-04-27 | Embed SmartNR_IB as NR_Calculate() sub-module (InpNR_Enable toggle)
-// v1.63 | 2026-04-24 | Live swing scan lastB total-2 (skip forming bar) → Real/Demo consistent
-// v1.62 | 2026-04-24 | EMA dist → USD (tickVal*tickSize*Lot)
-// v1.61 | 2026-04-24
-//   - Dashboard: เพิ่มแถว EMA_STATUS (BULL/BEAR/SIDE | slope | dist | E200 | action)
-//     ใต้ TITLE ใน Market Context panel — ใช้ g_emaHandle ที่มีอยู่แล้ว
-//
-// v1.57 | 2026-04-23
-//   - EMA: เปลี่ยนจาก OBJ_TREND เป็น ChartIndicatorAdd (ไม่กระพริบ, เร็วขึ้น)
-//
-// v1.56 | 2026-04-23
-//   - EMA Overlay: เพิ่มเส้น EMA 2 เส้น (200/720) พร้อม input เปิด/ปิด
-//
-// v1.55 | 2026-04-23
-//   - Strategic What's Next: แยกเป็น 3 ชั้น Bias/Setup/Entry
-//   - GetBiasScore: p50+M15+DXY (hard block ถ้า p50 ขัด)
-//   - GetSetupScore: sweep decay, zone distance, R:R, M1
-//   - GetEntryBlockReason: ตรวจ hard filters จริงทุกตัว
-//   - Sweep Decay: 0-3 bars=+30, 4-8 bars=+15, >8=0
-//   - Confidence bar = Bias*60% + Setup*40%
-//
-// v1.54 | 2026-04-23
-//   - Hull Trail SL: เพิ่ม threshold กำไร $1 USD ก่อนเริ่มเลื่อน SL
-//     (เดิมเลื่อนทันทีตั้งแต่แท่งแรก แม้ยังไม่มีกำไร)
-//
-// v1.52 | prior
-//   - Hull Trail SL + Dynamic TP (candle-close based)
-//   - Fibo 261.8% SL Mode, DXY Market Monitor, Session Filter
 //+------------------------------------------------------------------+
 #include <Trade\Trade.mqh>
 
@@ -390,6 +351,44 @@ input color  InpATRColorMinus150       = clrViolet;
 input color  InpATRColorMinus200       = clrMagenta;
 input color  InpATRColorMinus250       = clrDarkViolet;
 input color  InpATRColorMinus300       = clrPurple;
+
+input group           "=== BOS / CHoCH Visual ==="
+input bool   InpBOS_Show           = true;        // Show BOS/CHoCH lines on chart
+input int    InpBOS_SwingLookback  = 26;           // Swing pivot lookback bars
+input color  InpBOS_BullColor      = clrLime;     // BOS Bullish line color
+input color  InpBOS_BearColor      = clrRed;      // BOS Bearish line color
+input color  InpBOS_ChochColor     = clrOrange;   // CHoCH line color
+input int    InpBOS_Width          = 2;           // Line width
+input int    InpBOS_TextSize       = 8;           // Label font size
+
+input group           "=== VWAP Daily Visual ==="
+input bool   InpVWAP_Show       = true;           // Show Daily VWAP line
+input color  InpVWAP_Color      = clrYellow;      // VWAP line color
+input int    InpVWAP_Width      = 2;              // VWAP line width
+
+input group           "=== FVG (Fair Value Gap) Visual ==="
+input bool   InpFVG_Show        = true;           // Show FVG boxes on chart
+input color  InpFVG_BullColor   = C'0,80,0';      // Bullish FVG box color
+input color  InpFVG_BearColor   = C'80,0,0';      // Bearish FVG box color
+input int    InpFVG_Transp      = 80;             // FVG box transparency (0=opaque 100=clear)
+input int    InpFVG_MaxBars     = 100;            // Max bars back to scan for FVG
+input int    InpFVG_MaxCount    = 10;             // Max active FVGs to keep
+input int    InpFVG_MaxAge      = 200;            // Max FVG age (bars) — auto-delete old zones
+input double InpFVG_MinSize     = 50.0;           // Min FVG size (Points) — filter noise
+input double InpFVG_BodyRatio   = 60.0;           // Min impulse body ratio % (0=disabled)
+input bool   InpFVG_ATRFilter   = true;           // Require impulse candle >= 1.5x ATR
+
+input group           "=== Session VP Monitor ==="
+input bool   InpVpSession          = true;    // Show Session VP (Asia/London/NY)
+input int    InpVpRowSize          = 100;     // VP rows (ยิ่งมาก ยิ่ง precise)
+input double InpVpValueArea        = 0.68;    // Value Area % (68% = 1 SD)
+input int    InpRetestTolerancePts = 150;     // Retest tolerance ห่าง VAH/VAL (points)
+input int    InpBreakoutBufferPts  = 100;     // Breakout buffer เหนือ VAH / ใต้ VAL (points)
+input bool   InpVpNotifyBreakout   = true;    // Notify on Breakout
+input bool   InpVpNotifyRetest     = true;    // Notify on Retest
+input color  InpVpColorPOC         = clrDeepPink;    // POC line color
+input color  InpVpColorVAH         = clrLime;        // VAH line color
+input color  InpVpColorVAL         = clrOrangeRed;   // VAL line color
 
 //+------------------------------------------------------------------+
 //|  STRUCTS                                                         |
@@ -807,12 +806,671 @@ int       g_emaHandle[4]  = {INVALID_HANDLE, INVALID_HANDLE, INVALID_HANDLE, INV
 datetime  g_emaLastBar    = 0;
 datetime  g_nrMALastBar   = 0;
 
+//--- Visual Overlay globals
+// BOS/CHoCH — SMC-style stateful bias tracker
+struct DLZ_StructurePoint {
+   double   price;
+   datetime time;
+   bool     isHigh;
+   bool     isBOS;
+};
+DLZ_StructurePoint g_dlzSwings[];
+int      g_dlzSwingCount    = 0;
+int      g_dlzBias          = 0;   // +1=Bull BOS | -1=Bear BOS | 0=neutral
+double   g_dlzLastBOSPrice  = 0;
+datetime g_dlzLastBOSTime   = 0;
+double   g_dlzLastCHoChPrice= 0;
+bool     g_dlzLastWasCHoCH  = false;
+
+// VWAP
+datetime  g_vwapDay       = 0;  // วันที่คำนวณ VWAP อยู่ (00:00 GMT)
+double    g_vwapCumTPV    = 0;  // Cumulative (TP × Volume)
+double    g_vwapCumVol    = 0;  // Cumulative Volume
+
+// Session VP Monitor
+struct VP_ROW { double priceByRow; double volBuy; double volSell; double volTotal; };
+struct SessionVP { double poc, vah, val, sessionHigh, sessionLow;
+                   datetime sessionStart, sessionEnd; bool isFormed; };
+enum VP_STATE { VP_WAITING, VP_BROKEN_UP, VP_BROKEN_DN,
+                VP_RETESTING_VAH, VP_RETESTING_VAL, VP_CONFIRMED };
+SessionVP VpAsia, VpLondon, VpNY;
+VP_STATE  VpStateAsia=VP_WAITING, VpStateLondon=VP_WAITING, VpStateNY=VP_WAITING;
+datetime  VpLastNotifyAsia=0, VpLastNotifyLondon=0, VpLastNotifyNY=0;
+bool      VpBreakoutNotifiedAsia=false,   VpRetestNotifiedAsia=false;
+bool      VpBreakoutNotifiedLondon=false, VpRetestNotifiedLondon=false;
+bool      VpBreakoutNotifiedNY=false,     VpRetestNotifiedNY=false;
+datetime  VpLastResetDay = 0;
+
+// FVG
+struct DLZ_FVG {
+   double   top;
+   double   bottom;
+   datetime time;
+   bool     isBull;
+   bool     isFilled;
+};
+DLZ_FVG  g_fvgList[];
+int      g_fvgCount = 0;
+
 //+------------------------------------------------------------------+
 //|  HELPER: unique object name                                      |
 //+------------------------------------------------------------------+
 string ObjName(const string prefix)
 {
    return OBJ_PREFIX + prefix + IntegerToString(g_objCounter++);
+}
+
+//+------------------------------------------------------------------+
+//|  VISUAL: Draw BOS / CHoCH lines from p50 swings                  |
+//+------------------------------------------------------------------+
+void DLZ_CreateStructObj(datetime t, double price, string label, color clr)
+{
+   string lineName = "DLZ_BOS_LINE_" + IntegerToString((long)t);
+   string textName = "DLZ_BOS_TEXT_" + IntegerToString((long)t);
+   datetime endTime = TimeCurrent() + (PeriodSeconds(_Period) * 20);
+
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_TREND, 0, t, price, endTime, price);
+   else
+      ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, endTime);
+   ObjectSetInteger(0, lineName, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, lineName, OBJPROP_STYLE,      STYLE_DASH);
+   ObjectSetInteger(0, lineName, OBJPROP_WIDTH,      InpBOS_Width);
+   ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT,  false);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK,       true);
+   ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+
+   if(ObjectFind(0, textName) < 0)
+      ObjectCreate(0, textName, OBJ_TEXT, 0, endTime, price);
+   else
+      ObjectSetInteger(0, textName, OBJPROP_TIME, 0, endTime);
+   ObjectSetString (0, textName, OBJPROP_TEXT,       " " + label);
+   ObjectSetInteger(0, textName, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, textName, OBJPROP_FONTSIZE,   InpBOS_TextSize);
+   ObjectSetString (0, textName, OBJPROP_FONT,       "Segoe UI Semibold");
+   ObjectSetInteger(0, textName, OBJPROP_ANCHOR,     ANCHOR_LEFT);
+   ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+}
+
+void DLZ_UpdateStructure()
+{
+   if(!InpBOS_Show) return;
+
+   int needed = InpBOS_SwingLookback * 2 + 200;
+   if(Bars(_Symbol, _Period) < needed) return;
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, _Period, 0, needed, rates);
+   if(copied < needed) return;
+
+   int lb = InpBOS_SwingLookback;
+
+   // ตรวจ Swing Highs / Lows — loop old→recent เพื่อให้ newest swing อยู่ท้ายอาร์เรย์
+   for(int i = copied - lb - 1; i >= lb; i--)
+   {
+      bool isSwingHigh = true, isSwingLow = true;
+      for(int j = 1; j <= lb; j++) {
+         if(rates[i].high <= rates[i-j].high || rates[i].high <= rates[i+j].high) isSwingHigh = false;
+         if(rates[i].low  >= rates[i-j].low  || rates[i].low  >= rates[i+j].low)  isSwingLow  = false;
+      }
+      if(!isSwingHigh && !isSwingLow) continue;
+
+      if(g_dlzSwingCount > ArraySize(g_dlzSwings)) g_dlzSwingCount = ArraySize(g_dlzSwings);
+      bool exists = false;
+      for(int k = 0; k < g_dlzSwingCount; k++) {
+         if(g_dlzSwings[k].time == rates[i].time &&
+            g_dlzSwings[k].isHigh == isSwingHigh) { exists = true; break; }
+      }
+      if(exists) continue;
+
+      ArrayResize(g_dlzSwings, g_dlzSwingCount + 1);
+      g_dlzSwings[g_dlzSwingCount].price  = isSwingHigh ? rates[i].high : rates[i].low;
+      g_dlzSwings[g_dlzSwingCount].time   = rates[i].time;
+      g_dlzSwings[g_dlzSwingCount].isHigh = isSwingHigh;
+      g_dlzSwings[g_dlzSwingCount].isBOS  = false;
+      g_dlzSwingCount++;
+   }
+
+   if(g_dlzSwingCount < 2) return;
+   if(g_dlzSwingCount > ArraySize(g_dlzSwings)) g_dlzSwingCount = ArraySize(g_dlzSwings);
+
+   double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // หา lastHigh และ lastLow ล่าสุดแยกกัน (ไม่ใช้แค่ last swing เพราะอาจ direction ไม่ตรง)
+   DLZ_StructurePoint lastHigh = {0, 0, false, false};
+   DLZ_StructurePoint lastLow  = {0, 0, false, false};
+   bool foundHigh = false, foundLow = false;
+   for(int k = g_dlzSwingCount - 1; k >= 0; k--) {
+      if(!foundHigh && g_dlzSwings[k].isHigh)  { lastHigh = g_dlzSwings[k]; foundHigh = true; }
+      if(!foundLow  && !g_dlzSwings[k].isHigh) { lastLow  = g_dlzSwings[k]; foundLow  = true; }
+      if(foundHigh && foundLow) break;
+   }
+
+   // BOS Bull (ทิศเดิม UP — break above last swing HIGH)
+   if(foundHigh && curPrice > lastHigh.price && g_dlzBias >= 0) {
+      if(g_dlzLastBOSPrice != lastHigh.price) {
+         g_dlzBias         = 1;
+         g_dlzLastBOSPrice = lastHigh.price;
+         g_dlzLastBOSTime  = TimeCurrent();
+         g_dlzLastWasCHoCH = false;
+         DLZ_CreateStructObj(lastHigh.time, lastHigh.price, "BOS ▲", InpBOS_BullColor);
+      }
+   }
+   // BOS Bear (ทิศเดิม DOWN — break below last swing LOW)
+   else if(foundLow && curPrice < lastLow.price && g_dlzBias <= 0) {
+      if(g_dlzLastBOSPrice != lastLow.price) {
+         g_dlzBias         = -1;
+         g_dlzLastBOSPrice = lastLow.price;
+         g_dlzLastBOSTime  = TimeCurrent();
+         g_dlzLastWasCHoCH = false;
+         DLZ_CreateStructObj(lastLow.time, lastLow.price, "BOS ▼", InpBOS_BearColor);
+      }
+   }
+   // CHoCH Bull (เดิม Bear → break above swing HIGH)
+   else if(foundHigh && curPrice > lastHigh.price && g_dlzBias == -1) {
+      if(g_dlzLastCHoChPrice != lastHigh.price) {
+         g_dlzLastCHoChPrice = lastHigh.price;
+         g_dlzLastWasCHoCH   = true;
+         g_dlzBias           = 0;
+         DLZ_CreateStructObj(lastHigh.time, lastHigh.price, "CHoCH ↑", InpBOS_ChochColor);
+      }
+   }
+   // CHoCH Bear (เดิม Bull → break below swing LOW)
+   else if(foundLow && curPrice < lastLow.price && g_dlzBias == 1) {
+      if(g_dlzLastCHoChPrice != lastLow.price) {
+         g_dlzLastCHoChPrice = lastLow.price;
+         g_dlzLastWasCHoCH   = true;
+         g_dlzBias           = 0;
+         DLZ_CreateStructObj(lastLow.time, lastLow.price, "CHoCH ↓", InpBOS_ChochColor);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//|  VISUAL: Draw Daily VWAP line (reset at 00:00 GMT each day)      |
+//+------------------------------------------------------------------+
+void DrawVWAP(const datetime& time_arr[], const double& high_arr[],
+              const double& low_arr[], const double& close_arr[],
+              const long& tick_vol[], int bars)
+{
+   if(!InpVWAP_Show) return;
+   if(bars < 2) return;
+
+   datetime curBarTime = time_arr[bars - 1];
+   MqlDateTime dt; TimeToStruct(curBarTime, dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime dayStart = StructToTime(dt);
+
+   // Reset เมื่อขึ้นวันใหม่
+   if(dayStart != g_vwapDay) {
+      g_vwapDay    = dayStart;
+      g_vwapCumTPV = 0;
+      g_vwapCumVol = 0;
+   }
+
+   // คำนวณ Daily Cumulative VWAP
+   double cumTPV = 0, cumVol = 0;
+   for(int i = 0; i < bars; i++) {
+      if(time_arr[i] < dayStart) continue;
+      double tp  = (high_arr[i] + low_arr[i] + close_arr[i]) / 3.0;
+      double vol = (double)tick_vol[i];
+      if(vol <= 0) vol = 1;
+      cumTPV += tp * vol;
+      cumVol += vol;
+   }
+   if(cumVol <= 0) return;
+   double vwap = cumTPV / cumVol;
+
+   // OBJ_HLINE — เส้นแนวนอนที่ราคา VWAP ปัจจุบัน
+   string lineName  = "DLZ_VWAP_LINE";
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, vwap);
+   ObjectSetDouble (0, lineName, OBJPROP_PRICE,    vwap);
+   ObjectSetInteger(0, lineName, OBJPROP_COLOR,    InpVWAP_Color);
+   ObjectSetInteger(0, lineName, OBJPROP_WIDTH,    InpVWAP_Width);
+   ObjectSetInteger(0, lineName, OBJPROP_STYLE,    STYLE_SOLID);
+   ObjectSetString (0, lineName, OBJPROP_TOOLTIP,  "VWAP: " + DoubleToString(vwap, _Digits));
+
+   // OBJ_LABEL — แสดงค่า VWAP มุมบนขวา
+   string labelName = "DLZ_VWAP_LABEL";
+   if(ObjectFind(0, labelName) < 0)
+      ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, labelName, OBJPROP_CORNER,     CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE,  400);
+   ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE,  25);
+   ObjectSetInteger(0, labelName, OBJPROP_COLOR,      InpVWAP_Color);
+   ObjectSetString (0, labelName, OBJPROP_FONT,       "Arial Bold");
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE,   10);
+   ObjectSetString (0, labelName, OBJPROP_TEXT,       "VWAP: " + DoubleToString(vwap, _Digits));
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//|  FVG: Add with dedup + overlap check                             |
+//+------------------------------------------------------------------+
+bool DLZ_AddFVG(double top, double bottom, datetime time, bool isBull)
+{
+   // Duplicate check by bar time + direction
+   for(int k = 0; k < g_fvgCount; k++)
+      if(g_fvgList[k].time == time && g_fvgList[k].isBull == isBull) return false;
+   // Overlap filter — same direction, intersecting range
+   for(int k = 0; k < g_fvgCount; k++) {
+      if(g_fvgList[k].isFilled || g_fvgList[k].isBull != isBull) continue;
+      if(MathMin(top, g_fvgList[k].top) > MathMax(bottom, g_fvgList[k].bottom)) return false;
+   }
+   // Evict oldest filled/alerted if at capacity
+   if(g_fvgCount >= InpFVG_MaxCount) {
+      int rem = 0;
+      for(int k = 0; k < g_fvgCount; k++)
+         if(g_fvgList[k].isFilled) { rem = k; break; }
+      for(int k = rem; k < g_fvgCount - 1; k++) g_fvgList[k] = g_fvgList[k+1];
+      g_fvgCount--;
+   }
+   ArrayResize(g_fvgList, g_fvgCount + 1);
+   g_fvgList[g_fvgCount].top      = top;
+   g_fvgList[g_fvgCount].bottom   = bottom;
+   g_fvgList[g_fvgCount].time     = time;
+   g_fvgList[g_fvgCount].isBull   = isBull;
+   g_fvgList[g_fvgCount].isFilled = false;
+   g_fvgCount++;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//|  FVG: Detect from rates[], called once per new bar               |
+//+------------------------------------------------------------------+
+void DLZ_DetectFVG()
+{
+   if(!InpFVG_Show) return;
+   MqlRates rates[];
+   int total = CopyRates(_Symbol, _Period, 0, InpFVG_MaxBars + 5, rates);
+   if(total < 3) return;
+   ArraySetAsSeries(rates, true); // rates[0] = newest
+
+   double minSize = InpFVG_MinSize * _Point;
+   double currentATR = 0;
+   if(InpFVG_ATRFilter && g_atrHandle != INVALID_HANDLE) {
+      double atrBuf[1];
+      if(CopyBuffer(g_atrHandle, 0, 0, 1, atrBuf) > 0) currentATR = atrBuf[0];
+   }
+   double effectiveMin = (currentATR > 0) ? MathMax(minSize, currentATR * 0.25) : minSize;
+
+   // i goes from old→new in series array: i+2=oldest, i+1=impulse, i=newest of triple
+   for(int i = MathMin(InpFVG_MaxBars, total - 3); i >= 1; i--)
+   {
+      double fullRange = rates[i+1].high - rates[i+1].low;
+      if(fullRange <= 0) continue;
+      if(InpFVG_ATRFilter && currentATR > 0 && fullRange < currentATR * 1.5) continue;
+      if(InpFVG_BodyRatio > 0) {
+         double bodyRatio = (MathAbs(rates[i+1].open - rates[i+1].close) / fullRange) * 100.0;
+         if(bodyRatio < InpFVG_BodyRatio) continue;
+      }
+
+      // Bullish FVG: High[i+2] < Low[i]
+      if(rates[i+2].high < rates[i].low) {
+         double fvgTop = rates[i].low;
+         double fvgBot = rates[i+2].high;
+         bool filled = false;
+         for(int k = i - 1; k >= 0; k--) {
+            if(rates[k].low <= fvgBot) { filled = true; break; }
+            if(rates[k].low < fvgTop) fvgTop = rates[k].low;
+         }
+         if(!filled && (fvgTop - fvgBot) >= effectiveMin)
+            DLZ_AddFVG(fvgTop, fvgBot, rates[i+2].time, true);
+      }
+      // Bearish FVG: Low[i+2] > High[i]
+      if(rates[i+2].low > rates[i].high) {
+         double fvgTop = rates[i+2].low;
+         double fvgBot = rates[i].high;
+         bool filled = false;
+         for(int k = i - 1; k >= 0; k--) {
+            if(rates[k].high >= fvgTop) { filled = true; break; }
+            if(rates[k].high > fvgBot) fvgBot = rates[k].high;
+         }
+         if(!filled && (fvgTop - fvgBot) >= effectiveMin)
+            DLZ_AddFVG(fvgTop, fvgBot, rates[i+2].time, false);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//|  FVG: Check shrink/fill on every tick                            |
+//+------------------------------------------------------------------+
+void DLZ_CheckFVGFill()
+{
+   if(!InpFVG_Show) return;
+   double curHigh = iHigh(_Symbol, _Period, 0);
+   double curLow  = iLow(_Symbol, _Period, 0);
+
+   // หา lastHigh / lastLow จาก g_dlzSwings สำหรับ Swing invalidation
+   double lastSwingHigh = 0, lastSwingLow = DBL_MAX;
+   for(int k = g_dlzSwingCount - 1; k >= 0; k--) {
+      if(lastSwingHigh == 0 && g_dlzSwings[k].isHigh)  { lastSwingHigh = g_dlzSwings[k].price; }
+      if(lastSwingLow == DBL_MAX && !g_dlzSwings[k].isHigh) { lastSwingLow = g_dlzSwings[k].price; }
+      if(lastSwingHigh != 0 && lastSwingLow != DBL_MAX) break;
+   }
+
+   for(int i = 0; i < g_fvgCount; i++)
+   {
+      if(g_fvgList[i].isFilled) continue;
+      string fvgName = "DLZ_FVG_" + IntegerToString((long)g_fvgList[i].time);
+      string midName = "MID_" + fvgName;
+
+      // [1] Time Expiry — ลบ FVG ที่อายุเกิน InpFVG_MaxAge แท่ง
+      if(InpFVG_MaxAge > 0) {
+         int age = iBarShift(_Symbol, _Period, g_fvgList[i].time, false);
+         if(age > InpFVG_MaxAge) {
+            ObjectDelete(0, fvgName);
+            ObjectDelete(0, midName);
+            for(int k = i; k < g_fvgCount - 1; k++) g_fvgList[k] = g_fvgList[k+1];
+            g_fvgCount--;
+            i--;
+            continue;
+         }
+      }
+
+      // [2] Swing Invalidation — ลบ FVG ที่โครงสร้างผ่านไปแล้ว
+      // Bearish FVG: ถ้าราคาทะลุ Swing High ล่าสุด → โซนนี้ไม่มีนัยสำคัญแล้ว
+      if(!g_fvgList[i].isBull && lastSwingHigh > 0 && curHigh > lastSwingHigh) {
+         ObjectDelete(0, fvgName);
+         ObjectDelete(0, midName);
+         g_fvgList[i].isFilled = true;
+         continue;
+      }
+      // Bullish FVG: ถ้าราคาทะลุ Swing Low ล่าสุด → โซนนี้ไม่มีนัยสำคัญแล้ว
+      if(g_fvgList[i].isBull && lastSwingLow < DBL_MAX && curLow < lastSwingLow) {
+         ObjectDelete(0, fvgName);
+         ObjectDelete(0, midName);
+         g_fvgList[i].isFilled = true;
+         continue;
+      }
+
+      // [3] Normal Fill / Partial Shrink
+      if(g_fvgList[i].isBull) {
+         if(curLow < g_fvgList[i].top && curLow > g_fvgList[i].bottom)
+            g_fvgList[i].top = curLow; // partial shrink
+         if(curLow <= g_fvgList[i].bottom) {
+            g_fvgList[i].isFilled = true;
+            ObjectDelete(0, fvgName);
+            ObjectDelete(0, midName);
+         }
+      } else {
+         if(curHigh > g_fvgList[i].bottom && curHigh < g_fvgList[i].top)
+            g_fvgList[i].bottom = curHigh; // partial shrink
+         if(curHigh >= g_fvgList[i].top) {
+            g_fvgList[i].isFilled = true;
+            ObjectDelete(0, fvgName);
+            ObjectDelete(0, midName);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//|  FVG: Draw/update all box + CE midline objects                   |
+//+------------------------------------------------------------------+
+void DLZ_DrawFVGObjects()
+{
+   if(!InpFVG_Show) return;
+   datetime futureTime = TimeCurrent() + 3600 * 24 * 5;
+
+   for(int i = 0; i < g_fvgCount; i++)
+   {
+      if(g_fvgList[i].isFilled) continue;
+      string fvgName = "DLZ_FVG_" + IntegerToString((long)g_fvgList[i].time);
+      string midName = "MID_" + fvgName;
+      color  clr     = g_fvgList[i].isBull ? InpFVG_BullColor : InpFVG_BearColor;
+      double midPrice = (g_fvgList[i].top + g_fvgList[i].bottom) / 2.0;
+
+      if(ObjectFind(0, fvgName) < 0) ObjectCreate(0, fvgName, OBJ_RECTANGLE, 0, 0, 0, 0, 0);
+      ObjectSetInteger(0, fvgName, OBJPROP_TIME,   0, g_fvgList[i].time);
+      ObjectSetDouble (0, fvgName, OBJPROP_PRICE,  0, g_fvgList[i].top);
+      ObjectSetInteger(0, fvgName, OBJPROP_TIME,   1, futureTime);
+      ObjectSetDouble (0, fvgName, OBJPROP_PRICE,  1, g_fvgList[i].bottom);
+      ObjectSetInteger(0, fvgName, OBJPROP_COLOR,  clr);
+      ObjectSetInteger(0, fvgName, OBJPROP_BGCOLOR, AlphaColor(clr, InpFVG_Transp));
+      ObjectSetInteger(0, fvgName, OBJPROP_FILL,   true);
+      ObjectSetInteger(0, fvgName, OBJPROP_BACK,   true);
+      ObjectSetInteger(0, fvgName, OBJPROP_STYLE,  STYLE_DOT);
+      ObjectSetInteger(0, fvgName, OBJPROP_WIDTH,  1);
+
+      if(ObjectFind(0, midName) < 0) ObjectCreate(0, midName, OBJ_TREND, 0, 0, 0, 0, 0);
+      ObjectSetInteger(0, midName, OBJPROP_TIME,      0, g_fvgList[i].time);
+      ObjectSetDouble (0, midName, OBJPROP_PRICE,     0, midPrice);
+      ObjectSetInteger(0, midName, OBJPROP_TIME,      1, futureTime);
+      ObjectSetDouble (0, midName, OBJPROP_PRICE,     1, midPrice);
+      ObjectSetInteger(0, midName, OBJPROP_COLOR,     clr);
+      ObjectSetInteger(0, midName, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, midName, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, midName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, midName, OBJPROP_BACK,      false);
+   }
+}
+
+//+------------------------------------------------------------------+
+//|  SESSION VP MONITOR                                              |
+//+------------------------------------------------------------------+
+bool CalcSessionVP(ENUM_TIMEFRAMES tf, datetime sessionStart, datetime sessionEnd, SessionVP &vp)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   int copied = CopyRates(_Symbol, tf, sessionStart, sessionEnd, rates);
+   if(copied < 3) return false;
+
+   double maxH = -DBL_MAX, minL = DBL_MAX;
+   for(int i = 0; i < copied; i++) {
+      if(rates[i].high > maxH) maxH = rates[i].high;
+      if(rates[i].low  < minL) minL = rates[i].low;
+   }
+   if(maxH <= minL) return false;
+
+   double rangeV = maxH - minL;
+   double step   = rangeV / InpVpRowSize;
+   if(step <= 0) return false;
+
+   VP_ROW rows[];
+   if(ArrayResize(rows, InpVpRowSize) != InpVpRowSize) return false;
+   for(int k = 0; k < InpVpRowSize; k++) {
+      rows[k].priceByRow = minL + k * step;
+      rows[k].volBuy = rows[k].volSell = rows[k].volTotal = 0;
+   }
+
+   for(int i = 0; i < copied; i++) {
+      double avgP = (rates[i].high + rates[i].low) / 2.0;
+      int idx = (int)((avgP - minL) / step);
+      if(idx >= InpVpRowSize) idx = InpVpRowSize - 1;
+      if(idx < 0) idx = 0;
+      double vol = (double)rates[i].tick_volume;
+      bool isBull = (rates[i].close >= rates[i].open);
+      if(isBull) rows[idx].volBuy   += vol;
+      else        rows[idx].volSell  += vol;
+      rows[idx].volTotal += vol;
+   }
+
+   // POC
+   double maxVol = 0, totalVol = 0;
+   int pocIdx = 0;
+   for(int k = 0; k < InpVpRowSize; k++) {
+      if(rows[k].volTotal > maxVol) { maxVol = rows[k].volTotal; pocIdx = k; }
+      totalVol += rows[k].volTotal;
+   }
+
+   // Value Area (68%)
+   double targetVA = totalVol * InpVpValueArea;
+   double curVA    = rows[pocIdx].volTotal;
+   int upIdx = pocIdx, dnIdx = pocIdx;
+   while(curVA < targetVA) {
+      if(upIdx >= InpVpRowSize-1 && dnIdx <= 0) break;
+      double nextUp = (upIdx < InpVpRowSize-1) ? rows[upIdx+1].volTotal : 0;
+      double nextDn = (dnIdx > 0)              ? rows[dnIdx-1].volTotal : 0;
+      if(nextUp >= nextDn && upIdx < InpVpRowSize-1) { upIdx++; curVA += nextUp; }
+      else if(dnIdx > 0)                             { dnIdx--; curVA += nextDn; }
+      else if(upIdx < InpVpRowSize-1)                { upIdx++; curVA += nextUp; }
+      else break;
+   }
+
+   vp.poc          = rows[pocIdx].priceByRow + (step / 2.0);
+   vp.vah          = rows[upIdx].priceByRow  + step;
+   vp.val          = rows[dnIdx].priceByRow;
+   vp.sessionHigh  = maxH;
+   vp.sessionLow   = minL;
+   vp.sessionStart = sessionStart;
+   vp.sessionEnd   = sessionEnd;
+   vp.isFormed     = true;
+   return true;
+}
+
+void DrawVPLines(string prefix, SessionVP &vp, color clrPOC, color clrVAH, color clrVAL)
+{
+   if(!vp.isFormed) return;
+   datetime t2 = (datetime)(vp.sessionEnd + PeriodSeconds(PERIOD_H1) * 8);
+   string nPOC = prefix+"POC", nVAH = prefix+"VAH", nVAL = prefix+"VAL";
+
+   ObjectDelete(0, nPOC);
+   ObjectCreate(0, nPOC, OBJ_TREND, 0, vp.sessionStart, vp.poc, t2, vp.poc);
+   ObjectSetInteger(0, nPOC, OBJPROP_RAY_RIGHT, false);
+   ObjectSetDouble (0, nPOC, OBJPROP_PRICE, 0, vp.poc);
+   ObjectSetDouble (0, nPOC, OBJPROP_PRICE, 1, vp.poc);
+   ObjectSetInteger(0, nPOC, OBJPROP_TIME,  0, vp.sessionStart);
+   ObjectSetInteger(0, nPOC, OBJPROP_TIME,  1, t2);
+   ObjectSetInteger(0, nPOC, OBJPROP_COLOR, clrPOC);
+   ObjectSetInteger(0, nPOC, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, nPOC, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, nPOC, OBJPROP_BACK,  true);
+   ObjectSetString (0, nPOC, OBJPROP_TOOLTIP, prefix+" POC: "+DoubleToString(vp.poc, _Digits));
+
+   ObjectDelete(0, nVAH);
+   ObjectCreate(0, nVAH, OBJ_TREND, 0, vp.sessionStart, vp.vah, t2, vp.vah);
+   ObjectSetInteger(0, nVAH, OBJPROP_RAY_RIGHT, false);
+   ObjectSetDouble (0, nVAH, OBJPROP_PRICE, 0, vp.vah);
+   ObjectSetDouble (0, nVAH, OBJPROP_PRICE, 1, vp.vah);
+   ObjectSetInteger(0, nVAH, OBJPROP_TIME,  0, vp.sessionStart);
+   ObjectSetInteger(0, nVAH, OBJPROP_TIME,  1, t2);
+   ObjectSetInteger(0, nVAH, OBJPROP_COLOR, clrVAH);
+   ObjectSetInteger(0, nVAH, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, nVAH, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, nVAH, OBJPROP_BACK,  true);
+   ObjectSetString (0, nVAH, OBJPROP_TOOLTIP, prefix+" VAH: "+DoubleToString(vp.vah, _Digits));
+
+   ObjectDelete(0, nVAL);
+   ObjectCreate(0, nVAL, OBJ_TREND, 0, vp.sessionStart, vp.val, t2, vp.val);
+   ObjectSetInteger(0, nVAL, OBJPROP_RAY_RIGHT, false);
+   ObjectSetDouble (0, nVAL, OBJPROP_PRICE, 0, vp.val);
+   ObjectSetDouble (0, nVAL, OBJPROP_PRICE, 1, vp.val);
+   ObjectSetInteger(0, nVAL, OBJPROP_TIME,  0, vp.sessionStart);
+   ObjectSetInteger(0, nVAL, OBJPROP_TIME,  1, t2);
+   ObjectSetInteger(0, nVAL, OBJPROP_COLOR, clrVAL);
+   ObjectSetInteger(0, nVAL, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, nVAL, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, nVAL, OBJPROP_BACK,  true);
+   ObjectSetString (0, nVAL, OBJPROP_TOOLTIP, prefix+" VAL: "+DoubleToString(vp.val, _Digits));
+   ChartRedraw();
+}
+
+void CheckVPSignal(string sessionName, SessionVP &vp, VP_STATE &state, datetime &lastNotify,
+                   color clrPOC, bool &breakoutNotified, bool &retestNotified)
+{
+   if(!vp.isFormed) return;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double retestTol = InpRetestTolerancePts * _Point;
+   double boBuf     = InpBreakoutBufferPts  * _Point;
+
+   if(state == VP_WAITING) {
+      if(ask > vp.vah + boBuf)           { state = VP_BROKEN_UP; breakoutNotified = false; retestNotified = false; }
+      else if(bid < vp.val - boBuf)      { state = VP_BROKEN_DN; breakoutNotified = false; retestNotified = false; }
+   }
+   if(ask > vp.vah + boBuf) {
+      if(state == VP_BROKEN_DN || state == VP_RETESTING_VAL)
+         { state = VP_BROKEN_UP; breakoutNotified = false; retestNotified = false; }
+   } else if(bid < vp.val - boBuf) {
+      if(state == VP_BROKEN_UP || state == VP_RETESTING_VAH)
+         { state = VP_BROKEN_DN; breakoutNotified = false; retestNotified = false; }
+   }
+   if(state == VP_BROKEN_UP && bid <= vp.vah + retestTol && bid >= vp.vah - retestTol)
+      { state = VP_RETESTING_VAH; retestNotified = false; }
+   if(state == VP_BROKEN_DN && ask >= vp.val - retestTol && ask <= vp.val + retestTol)
+      { state = VP_RETESTING_VAL; retestNotified = false; }
+   if(state == VP_RETESTING_VAH && bid < vp.val - boBuf)
+      { state = VP_BROKEN_DN; breakoutNotified = false; retestNotified = false; }
+   if(state == VP_RETESTING_VAL && ask > vp.vah + boBuf)
+      { state = VP_BROKEN_UP; breakoutNotified = false; retestNotified = false; }
+
+   if(lastNotify == TimeCurrent()) return;
+
+   if(InpVpNotifyBreakout && state == VP_BROKEN_UP && !breakoutNotified && ask > vp.vah) {
+      string msg = StringFormat("📈 [VP-%s] BREAKOUT UP\nVAH=%.5f | POC=%.5f | VAL=%.5f\nAsk=%.5f",
+                                sessionName, vp.vah, vp.poc, vp.val, ask);
+      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      breakoutNotified = true; lastNotify = TimeCurrent();
+   }
+   if(InpVpNotifyBreakout && state == VP_BROKEN_DN && !breakoutNotified && bid < vp.val) {
+      string msg = StringFormat("📉 [VP-%s] BREAKOUT DN\nVAH=%.5f | POC=%.5f | VAL=%.5f\nBid=%.5f",
+                                sessionName, vp.vah, vp.poc, vp.val, bid);
+      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      breakoutNotified = true; lastNotify = TimeCurrent();
+   }
+   if(InpVpNotifyRetest && state == VP_RETESTING_VAH && !retestNotified) {
+      string msg = StringFormat("🔄 [VP-%s] RETEST VAH\nVAH=%.5f | Bid=%.5f", sessionName, vp.vah, bid);
+      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      retestNotified = true; lastNotify = TimeCurrent();
+   }
+   if(InpVpNotifyRetest && state == VP_RETESTING_VAL && !retestNotified) {
+      string msg = StringFormat("🔄 [VP-%s] RETEST VAL\nVAL=%.5f | Ask=%.5f", sessionName, vp.val, ask);
+      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      retestNotified = true; lastNotify = TimeCurrent();
+   }
+}
+
+void MonitorSessionVP()
+{
+   if(!InpVpSession) return;
+
+   // Reset ทุก VP เมื่อขึ้นวันใหม่ (00:00 GMT)
+   datetime today = (datetime)(TimeCurrent() - TimeCurrent() % 86400);
+   if(today != VpLastResetDay) {
+      VpAsia.isFormed = VpLondon.isFormed = VpNY.isFormed = false;
+      VpStateAsia = VpStateLondon = VpStateNY = VP_WAITING;
+      ObjectsDeleteAll(0, "DLZ_VPA_");
+      ObjectsDeleteAll(0, "DLZ_VPL_");
+      ObjectsDeleteAll(0, "DLZ_VPN_");
+      VpLastResetDay = today;
+   }
+
+   // คำนวณแค่ bar M5 ใหม่ (ลด CPU)
+   static datetime lastBarVP = 0;
+   datetime curBar = iTime(_Symbol, PERIOD_M5, 0);
+   if(curBar == lastBarVP) goto vp_check;
+   lastBarVP = curBar;
+
+   {
+      MqlDateTime t; TimeToStruct(TimeCurrent(), t); int h = t.hour;
+      bool inAsia   = (h >= InpAsian_Start  && h < InpAsian_End);
+      bool inLondon = (h >= InpLondon_Start && h < InpLondon_End);
+      bool inNY     = (h >= InpNY_Start     && h < InpNY_End);
+
+      datetime asiaStart   = today + InpAsian_Start  * 3600;
+      datetime londonStart = today + InpLondon_Start * 3600;
+      datetime nyStart     = today + InpNY_Start     * 3600;
+      datetime now         = TimeCurrent();
+
+      if(inAsia || !VpAsia.isFormed)
+         if(CalcSessionVP(PERIOD_M1, asiaStart, now, VpAsia))
+            DrawVPLines("DLZ_VPA_", VpAsia, InpVpColorPOC, InpVpColorVAH, InpVpColorVAL);
+
+      if(inLondon || !VpLondon.isFormed)
+         if(CalcSessionVP(PERIOD_M1, londonStart, now, VpLondon))
+            DrawVPLines("DLZ_VPL_", VpLondon, clrDarkOrange, InpVpColorVAH, InpVpColorVAL);
+
+      if(inNY || !VpNY.isFormed)
+         if(CalcSessionVP(PERIOD_M1, nyStart, now, VpNY))
+            DrawVPLines("DLZ_VPN_", VpNY, clrDodgerBlue, InpVpColorVAH, InpVpColorVAL);
+   }
+
+   vp_check:
+   if(VpAsia.isFormed)   CheckVPSignal("Asia",   VpAsia,   VpStateAsia,   VpLastNotifyAsia,   InpVpColorPOC,  VpBreakoutNotifiedAsia,   VpRetestNotifiedAsia);
+   if(VpLondon.isFormed) CheckVPSignal("London", VpLondon, VpStateLondon, VpLastNotifyLondon, clrDarkOrange,  VpBreakoutNotifiedLondon, VpRetestNotifiedLondon);
+   if(VpNY.isFormed)     CheckVPSignal("NY",     VpNY,     VpStateNY,     VpLastNotifyNY,     clrDodgerBlue,  VpBreakoutNotifiedNY,     VpRetestNotifiedNY);
 }
 
 //+------------------------------------------------------------------+
@@ -2897,6 +3555,9 @@ int OnInit()
 
    ObjectsDeleteAll(0, OBJ_PREFIX);
    ObjectsDeleteAll(0, DASH_PREFIX); // ลบ Dashboard เก่าถ้ามี
+   ObjectsDeleteAll(0, "DLZ_FVG_");
+   ObjectsDeleteAll(0, "MID_DLZ_FVG_");
+   ArrayResize(g_fvgList, 0); g_fvgCount = 0;
    
    ArrayResize(g_zones,     0);
    ArrayResize(g_histHighs, 0);
@@ -3135,6 +3796,18 @@ void OnDeinit(const int reason)
       if(g_emaHandle[i] != INVALID_HANDLE) { IndicatorRelease(g_emaHandle[i]); g_emaHandle[i] = INVALID_HANDLE; }
    }
    NR_Deinit();
+
+   // Visual overlay cleanup
+   ObjectsDeleteAll(0, "DLZ_BOS_LINE_");
+   ObjectsDeleteAll(0, "DLZ_BOS_TEXT_");
+   ArrayFree(g_dlzSwings);
+   g_dlzSwingCount = 0;
+   ObjectDelete(0, "DLZ_VWAP_LINE");
+   ObjectDelete(0, "DLZ_VWAP_LABEL");
+   ObjectsDeleteAll(0, "DLZ_FVG_");
+   ObjectsDeleteAll(0, "MID_DLZ_FVG_");
+   ArrayFree(g_fvgList);
+   g_fvgCount = 0;
 }
 
 //+------------------------------------------------------------------+
@@ -3993,6 +4666,15 @@ void OnTick()
    CheckOFAFibNotification();
    Commander.UpdateAccountInfo();
    UpdateEADashboard();
+
+   // Visual overlays (display only — no filter effect)
+   DLZ_UpdateStructure();
+   DrawVWAP(time_arr, high_arr, low_arr, close_arr, tick_vol, rates_total);
+   { static datetime _fvgLastBar = 0; datetime _curBar = time_arr[rates_total-1];
+     if(_curBar != _fvgLastBar) { _fvgLastBar = _curBar; DLZ_DetectFVG(); } }
+   DLZ_CheckFVGFill();
+   DLZ_DrawFVGObjects();
+   MonitorSessionVP();
 
    // ATR Previous Day Levels — redraw on new day (wait until handle is ready)
    if(InpATRLevelsEnable) {
