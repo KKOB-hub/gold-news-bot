@@ -1440,10 +1440,9 @@ void MonitorSessionVP()
    // คำนวณแค่ bar M5 ใหม่ (ลด CPU)
    static datetime lastBarVP = 0;
    datetime curBar = iTime(_Symbol, PERIOD_M5, 0);
-   if(curBar == lastBarVP) goto vp_check;
-   lastBarVP = curBar;
-
+   if(curBar != lastBarVP)
    {
+      lastBarVP = curBar;
       MqlDateTime t; TimeToStruct(TimeCurrent(), t); int h = t.hour;
       bool inAsia   = (h >= InpAsian_Start  && h < InpAsian_End);
       bool inLondon = (h >= InpLondon_Start && h < InpLondon_End);
@@ -1467,7 +1466,6 @@ void MonitorSessionVP()
             DrawVPLines("DLZ_VPN_", VpNY, clrDodgerBlue, InpVpColorVAH, InpVpColorVAL);
    }
 
-   vp_check:
    if(VpAsia.isFormed)   CheckVPSignal("Asia",   VpAsia,   VpStateAsia,   VpLastNotifyAsia,   InpVpColorPOC,  VpBreakoutNotifiedAsia,   VpRetestNotifiedAsia);
    if(VpLondon.isFormed) CheckVPSignal("London", VpLondon, VpStateLondon, VpLastNotifyLondon, clrDarkOrange,  VpBreakoutNotifiedLondon, VpRetestNotifiedLondon);
    if(VpNY.isFormed)     CheckVPSignal("NY",     VpNY,     VpStateNY,     VpLastNotifyNY,     clrDodgerBlue,  VpBreakoutNotifiedNY,     VpRetestNotifiedNY);
