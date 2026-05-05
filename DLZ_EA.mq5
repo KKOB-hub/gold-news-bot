@@ -4,11 +4,12 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.05"
+#property version     "2.06"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.06 | 2026-05-05 | NR Arrow: block Gray/White/Blue arrow (and order) if breakout > 50 bars from NR pattern
 // v2.05 | 2026-05-04 | Session VP Monitor: POC/VAH/VAL display per session (Asia/London/NY), reset daily 00:00 GMT
 // v2.04 | 2026-05-03 | VWAP display: replace OBJ_TREND segments with OBJ_HLINE + OBJ_LABEL (V11 style)
 // v2.03 | 2026-05-03 | Visual overlays: BOS/CHoCH lines, VWAP daily, FVG boxes (display only, no filter)
@@ -671,6 +672,7 @@ int      nr_rev_dir    = 0;    // +1=watch for BUY, -1=watch for SELL
 double   nr_rev_hi     = 0.0;
 double   nr_rev_lo     = 0.0;
 int      nr_rev_expBar = 0;
+int      nr_rev_patBar = 0;    // nr_pendRight bar index at trigger time (for 50-bar freshness check)
 
 double     nr_trendMA[];
 double     nr_atrRma[], nr_plusRma[], nr_minusRma[], nr_adxRma[];
@@ -1401,23 +1403,23 @@ void CheckVPSignal(string sessionName, SessionVP &vp, VP_STATE &state, datetime 
    if(InpVpNotifyBreakout && state == VP_BROKEN_UP && !breakoutNotified && ask > vp.vah) {
       string msg = StringFormat("📈 [VP-%s] BREAKOUT UP\nVAH=%.5f | POC=%.5f | VAL=%.5f\nAsk=%.5f",
                                 sessionName, vp.vah, vp.poc, vp.val, ask);
-      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      Print(msg);
       breakoutNotified = true; lastNotify = TimeCurrent();
    }
    if(InpVpNotifyBreakout && state == VP_BROKEN_DN && !breakoutNotified && bid < vp.val) {
       string msg = StringFormat("📉 [VP-%s] BREAKOUT DN\nVAH=%.5f | POC=%.5f | VAL=%.5f\nBid=%.5f",
                                 sessionName, vp.vah, vp.poc, vp.val, bid);
-      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      Print(msg);
       breakoutNotified = true; lastNotify = TimeCurrent();
    }
    if(InpVpNotifyRetest && state == VP_RETESTING_VAH && !retestNotified) {
       string msg = StringFormat("🔄 [VP-%s] RETEST VAH\nVAH=%.5f | Bid=%.5f", sessionName, vp.vah, bid);
-      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      Print(msg);
       retestNotified = true; lastNotify = TimeCurrent();
    }
    if(InpVpNotifyRetest && state == VP_RETESTING_VAL && !retestNotified) {
       string msg = StringFormat("🔄 [VP-%s] RETEST VAL\nVAL=%.5f | Ask=%.5f", sessionName, vp.val, ask);
-      Print(msg); if(InpAlertPush) SafeSendNotification(msg);
+      Print(msg);
       retestNotified = true; lastNotify = TimeCurrent();
    }
 }
@@ -4428,8 +4430,9 @@ void NR_Calculate(const int rates_total,
                }
             }
 
-            // Breakout arrow — วาดเฉพาะใน window เดียวกับ box
-            if(InpNR_ShowBreakArrow && shouldDraw) {
+            // Breakout arrow — วาดเฉพาะใน window เดียวกับ box และ breakout ไม่เกิน 50 bars จาก pattern
+            bool arrowFresh = (i - nr_pendRight) <= 50;
+            if(InpNR_ShowBreakArrow && shouldDraw && arrowFresh) {
                string arNm  = NR_OBJ_PFX + "ar_" + sid;
                double arY   = (dir > 0) ? low[i]  - 3 * _Point : high[i] + 3 * _Point;
                int    arCode= (dir > 0) ? 241 : 242;
@@ -4446,7 +4449,7 @@ void NR_Calculate(const int rates_total,
             }
 
             // Mode 4: open order on every arrow (Round1+Round2), live bar only — once per bar
-            if(InpNR_ArrowEntry && InpEA_Enable && g_isLive && i == rates_total - 1 && time[i] != g_lastNROrderBar)
+            if(InpNR_ArrowEntry && InpEA_Enable && g_isLive && i == rates_total - 1 && time[i] != g_lastNROrderBar && arrowFresh)
             {
                g_lastNROrderBar = time[i];
                CheckNRArrowEntry(dir, time[i], high[i], low[i]);
@@ -4484,6 +4487,7 @@ void NR_Calculate(const int rates_total,
          nr_rev_hi     = nr_pendHi;
          nr_rev_lo     = nr_pendLo;
          nr_rev_expBar = i + InpNR_ExtendFwd;
+         nr_rev_patBar = nr_pendRight; // เก็บไว้เช็ค 50-bar freshness
          nr_pend = false;
       }
 
@@ -4503,7 +4507,8 @@ void NR_Calculate(const int rates_total,
                double rng2   = MathMax(nr_rev_hi - nr_rev_lo, _Point);
                double tgt2   = (revDir > 0) ? entry2 + InpNR_ExitR * rng2 : entry2 - InpNR_ExitR * rng2;
 
-               if(InpNR_ShowBreakArrow && (i >= rates_total - InpNR_MaxKeep)) {
+               bool revArrowFresh = (i - nr_rev_patBar) <= 50;
+               if(InpNR_ShowBreakArrow && (i >= rates_total - InpNR_MaxKeep) && revArrowFresh) {
                   string arNm2 = NR_OBJ_PFX + "ar_" + sid2;
                   double arY2  = (revDir > 0) ? low[i]  - 3 * _Point : high[i] + 3 * _Point;
                   int arCode2  = (revDir > 0) ? 241 : 242;
@@ -4519,7 +4524,7 @@ void NR_Calculate(const int rates_total,
                }
 
                // เปิด order reversal — live bar only, once per bar
-               if(InpNR_ArrowEntry && InpEA_Enable && g_isLive && i == rates_total - 1 && time[i] != g_lastNROrderBar) {
+               if(InpNR_ArrowEntry && InpEA_Enable && g_isLive && i == rates_total - 1 && time[i] != g_lastNROrderBar && revArrowFresh) {
                   g_lastNROrderBar = time[i];
                   CheckNRArrowEntry(revDir, time[i], high[i], low[i]);
                   Print("[NR Rev] Reversal ", (revDir > 0 ? "BUY" : "SELL"), " @ ", DoubleToString(entry2, _Digits));
