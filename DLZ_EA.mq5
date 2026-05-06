@@ -4,11 +4,14 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.06"
+#property version     "2.09"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.09 | 2026-05-06 | Dashboard redesign: 4-panel layout, per-panel toggles, Entry Modes strip, Version header, Retrace%, DirectEntry warning
+// v2.08 | 2026-05-06 | Dashboard: MktCond + DayRun display (Strong Bull/Ranging/Weak + ATR consumed %, remaining, price position)
+// v2.07 | 2026-05-05 | NR Mode4 SELL: hard Fibo zone check always active (block >85% or <38.2% regardless of swingCount/InpFiboFilter)
 // v2.06 | 2026-05-05 | NR Arrow: block Gray/White/Blue arrow (and order) if breakout > 50 bars from NR pattern
 // v2.05 | 2026-05-04 | Session VP Monitor: POC/VAH/VAL display per session (Asia/London/NY), reset daily 00:00 GMT
 // v2.04 | 2026-05-03 | VWAP display: replace OBJ_TREND segments with OBJ_HLINE + OBJ_LABEL (V11 style)
@@ -41,6 +44,8 @@
 //--- Object name prefix (used for bulk cleanup)
 #define OBJ_PREFIX "DLZ_"
 #define DASH_PREFIX "DLZ_DASH_" // สำหรับ Dashboard
+#define DASH_W      430          // Dashboard panel width (px)
+#define EA_VERSION  "2.09"       // EA version string (sync with #property version)
 
 //+------------------------------------------------------------------+
 //|  INPUTS                                                          |
@@ -107,12 +112,16 @@ input int    InpRVolPeriod     = 50;   // RVol: Avg period (bars)
 input double InpRVolCreateMult = 1.5;  // RVol: CreateZone threshold multiplier
 input double InpRVolOrderMult  = 0;  // RVol: Order entry threshold multiplier
 
-//--- [NEW] DASHBOARD INPUTS ---
+//--- DASHBOARD INPUTS ---
 input group           "=== Dashboard Settings ==="
-input bool   InpShowDash      = true;        // Show Status Dashboard
-input int    InpDashX         = 20;          // Offset X (จากมุมขวา)
-input int    InpDashY         = 30;          // Offset Y
-input color  InpDashTxtColor  = clrWhite;    // Dashboard Text Color
+input bool   InpShowDash         = true;   // Show Dashboard (master toggle)
+input bool   InpShowDash_Signal  = true;   // Panel A: Signal Header
+input bool   InpShowDash_Modes   = true;   // Panel B: Entry Modes + Market Bias
+input bool   InpShowDash_WN      = true;   // Panel C: What's Next
+input bool   InpShowDash_Orders  = true;   // Panel D: Positions & Market
+input bool   InpShowDash_Debug   = false;  // Debug Panel (Hull Gap, M1 Value)
+input int    InpDashX            = 20;     // Offset X
+input int    InpDashY            = 30;     // Offset Y
 
 input bool   InpOFA_AggressiveFractal   = true;
 input int    InpOFA_FractalPeriod       = 26;            // Fast fractal period (p26)
@@ -634,6 +643,7 @@ bool          g_pendingIsBull   = false; // ทิศทางของ pending 
 double        g_poiPrice        = 0.0;
 double        g_targetPrice     = 0.0;
 bool          g_isBullStructure = false;
+double        g_lastRetrace     = 0.0;
 
 //+------------------------------------------------------------------+
 //|  SMART NR/IB GLOBALS                                            |
@@ -1580,7 +1590,56 @@ void CreateDashLabel(string name, int y_offset, string text, color clr, int font
    ObjectSetString(0, name, OBJPROP_FONT, isBold ? "Segoe UI Bold" : "Segoe UI Semibold");
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_BACK, false); // บังคับให้ลอยอยู่หน้าสุด
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+}
+
+void CreateDashLabelAt(string name, int xpos, int y_offset, string text, color clr, int fontSize=9, bool isBold=false)
+{
+   if(!InpShowDash) return;
+   if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, xpos);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y_offset);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  fontSize);
+   ObjectSetString (0, name, OBJPROP_FONT,      isBold ? "Segoe UI Bold" : "Segoe UI Semibold");
+   ObjectSetString (0, name, OBJPROP_TEXT,      text);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0, name, OBJPROP_BACK,      false);
+}
+
+string GetSessionName()
+{
+   if(!InpUseSessionProfile) return "All";
+   MqlDateTime t; TimeToStruct(TimeCurrent(), t);
+   int h = t.hour;
+   if(h >= InpLondon_Start && h < InpLondon_End) return "London";
+   if(h >= InpNY_Start     && h < InpNY_End)     return "New York";
+   if(h >= InpAsian_Start  && h < InpAsian_End)  return "Asia";
+   return "Off";
+}
+
+void DashMakePanel(string nm, int yPos, int h, color bg)
+{
+   ObjectDelete(0, nm);
+   ObjectCreate(0, nm, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, nm, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, InpDashX);
+   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, yPos);
+   ObjectSetInteger(0, nm, OBJPROP_XSIZE,     DASH_W);
+   ObjectSetInteger(0, nm, OBJPROP_YSIZE,     h);
+   ObjectSetInteger(0, nm, OBJPROP_BGCOLOR,   bg);
+   ObjectSetInteger(0, nm, OBJPROP_FILL,      true);
+   ObjectSetInteger(0, nm, OBJPROP_BACK,      false);
+   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE,false);
+}
+
+void DashModeRow(string nm, string label, bool isOn, bool isWarn=false)
+{
+   string icon = isOn ? "ON " : "OFF";
+   color  clr  = isWarn ? clrOrangeRed : isOn ? clrLime : clrGray;
+   ObjectSetString (0, nm, OBJPROP_TEXT,  label + icon);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, clr);
 }
 
 //+------------------------------------------------------------------+
@@ -1632,7 +1691,7 @@ void DrawTradeMarkers(double poi, double tgt, bool isBull)
 //+------------------------------------------------------------------+
 void UpdateClusterDashboard()
 {
-   if(!InpShowDash) return;
+   if(!InpShowDash || !InpShowDash_Orders) return;
 
    double curPrice  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double rangePts  = 150.0 * _Point * 10; // 150 pips radius (Gold: 150 pts)
@@ -1963,12 +2022,13 @@ void UpdateDashboard()
       }
    }
 
-   // 2. แสดงหัวข้อ Symbol & Price
-   string tf = StringSubstr(EnumToString(Period()), 7);
-   ObjectSetString(0, DASH_PREFIX+"TITLE", OBJPROP_TEXT, StringFormat("%s [%s]  Price: %s", _Symbol, tf, DoubleToString(curPrice, _Digits)));
+   // ─── Panel A: header + EMA ───
+   if(InpShowDash_Signal) {
+      string tf = StringSubstr(EnumToString(Period()), 7);
+      ObjectSetString(0, DASH_PREFIX+"A_HDR", OBJPROP_TEXT,
+                      StringFormat("DLZ_EA V." EA_VERSION "  |  %s [%s]  |  %s", _Symbol, tf, DoubleToString(curPrice, _Digits)));
 
-   // 2b. EMA Status Row
-   {
+      // EMA Status
       double ema200 = 0, ema200_prev = 0, ema720 = 0;
       double _ebuf[6];
       if(g_emaHandle[0] != INVALID_HANDLE && CopyBuffer(g_emaHandle[0], 0, 0, 6, _ebuf) == 6)
@@ -1977,155 +2037,147 @@ void UpdateDashboard()
       if(g_emaHandle[1] != INVALID_HANDLE && CopyBuffer(g_emaHandle[1], 0, 0, 2, _ebuf2) == 2)
          ema720 = _ebuf2[1];
 
-      string emaStatusTxt = "EMA: --";
-      color  emaStatusClr = clrSilver;
+      string emaTxt = "EMA: --"; color emaClr = clrSilver;
       if(ema200 > 0 && ema720 > 0) {
-         bool isBull  = (curPrice > ema200 && ema200 > ema720);
-         bool isBear  = (curPrice < ema200 && ema200 < ema720);
-         string estat = isBull ? "BULL" : isBear ? "BEAR" : "SIDE";
+         bool isBull = (curPrice > ema200 && ema200 > ema720);
+         bool isBear = (curPrice < ema200 && ema200 < ema720);
          string eslop = (ema200 > ema200_prev) ? "↗" : "↘";
-         double _tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-         double _tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-         double edist = (_tickSize > 0) ? (curPrice - ema200) / _tickSize * _tickVal * InpLot : 0;
-         string eact  = isBull ? "BUY" : isBear ? "SELL" : "WAIT";
-         emaStatusClr = isBull ? clrSpringGreen : isBear ? clrTomato : clrSilver;
-         emaStatusTxt = StringFormat("%s | %s | D:$%.2f | E200:%.1f | %s",
-                                     estat, eslop, edist, ema200, eact);
+         double _ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double _tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double edist = (_ts > 0) ? (curPrice - ema200) / _ts * _tv * InpLot : 0;
+         emaClr = isBull ? clrSpringGreen : isBear ? clrTomato : clrSilver;
+         emaTxt = StringFormat("EMA: %s %s  D:$%.2f  E200:%.1f",
+                               isBull?"BULL":isBear?"BEAR":"SIDE", eslop, edist, ema200);
       }
-      ObjectSetString (0, DASH_PREFIX+"EMA_STATUS", OBJPROP_TEXT,  emaStatusTxt);
-      ObjectSetInteger(0, DASH_PREFIX+"EMA_STATUS", OBJPROP_COLOR, emaStatusClr);
+      ObjectSetString (0, DASH_PREFIX+"A_EMA", OBJPROP_TEXT,  emaTxt);
+      ObjectSetInteger(0, DASH_PREFIX+"A_EMA", OBJPROP_COLOR, emaClr);
    }
 
-   // 3. Structure + P26 (รวมบรรทัดเดียว)
-   string structTxt = "Struct  - . p26 -";
-   color structClr = clrSilver;
-   if(gdx_swingCount2 > 1 && gdx_swingCount > 0) {
-      bool p50Up = gdx_swings2[gdx_swingCount2-1].isHigh;
-      bool p26Up = gdx_swings[gdx_swingCount-1].isHigh;
-      structTxt  = StringFormat("Struct  p50%s · p26%s", p50Up ? "▲" : "▼", p26Up ? "▲" : "▼");
-      structClr  = (p50Up && p26Up) ? clrLime : (!p50Up && !p26Up) ? clrTomato : clrGold;
-   } else if(gdx_swingCount2 > 1) {
-      bool p50Up = gdx_swings2[gdx_swingCount2-1].isHigh;
-      structTxt = StringFormat("Struct  p50%s · p26 ─", p50Up ? "▲" : "▼");
-      structClr = p50Up ? clrDeepSkyBlue : clrTomato;
+   // ─── Panel B left: Entry Modes ───
+   if(InpShowDash_Modes) {
+      SessionProfile prof = GetActiveProfile();
+
+      DashModeRow(DASH_PREFIX+"B_L1", "Zone Entry  ", InpZoneEntry);
+      DashModeRow(DASH_PREFIX+"B_L2", "Cluster     ", InpClusterEntry);
+      DashModeRow(DASH_PREFIX+"B_L3", "NR Mode4    ", InpNR_ArrowEntry);
+      DashModeRow(DASH_PREFIX+"B_L4", "Direct Ent  ", InpNR_DirectEntry, InpNR_DirectEntry);
+      DashModeRow(DASH_PREFIX+"B_L5", "Auto Pend   ", InpAutoPending);
+      {
+         string fiboTxt = InpFiboFilter
+                          ? StringFormat("Fibo ✓ <%.0f%%", prof.fiboMaxPct)
+                          : "Fibo --  OFF";
+         color  fiboClr = InpFiboFilter ? clrLime : clrGray;
+         ObjectSetString (0, DASH_PREFIX+"B_L6", OBJPROP_TEXT,  fiboTxt);
+         ObjectSetInteger(0, DASH_PREFIX+"B_L6", OBJPROP_COLOR, fiboClr);
+      }
+
+      // ─── Panel B right: Market Bias ───
+      // R1: Struct p50/p26
+      {
+         string sTxt = "Struct: --"; color sClr = clrSilver;
+         if(gdx_swingCount2 > 1 && gdx_swingCount > 0) {
+            bool p50Up = gdx_swings2[gdx_swingCount2-1].isHigh;
+            bool p26Up = gdx_swings [gdx_swingCount -1].isHigh;
+            sTxt = StringFormat("p50%s p26%s  %s", p50Up?"▲":"▼", p26Up?"▲":"▼",
+                                (p50Up&&p26Up)?"BULL":(!p50Up&&!p26Up)?"BEAR":"CONFLICT");
+            sClr = (p50Up&&p26Up)?clrLime:(!p50Up&&!p26Up)?clrTomato:clrGold;
+         } else if(gdx_swingCount2 > 1) {
+            bool p50Up = gdx_swings2[gdx_swingCount2-1].isHigh;
+            sTxt = StringFormat("p50%s  p26 ─", p50Up?"▲":"▼");
+            sClr = p50Up ? clrDeepSkyBlue : clrTomato;
+         }
+         ObjectSetString (0, DASH_PREFIX+"B_R1", OBJPROP_TEXT,  sTxt);
+         ObjectSetInteger(0, DASH_PREFIX+"B_R1", OBJPROP_COLOR, sClr);
+      }
+      // R2: Hull M1 + M15
+      {
+         string m1s  = (g_hullDirM1  == 1)?"▲":(g_hullDirM1 ==-1)?"▼":"─";
+         string m15s = (g_hullDirM15 == 1)?"▲":(g_hullDirM15==-1)?"▼":"─";
+         color  hClr = (g_hullDirM1==1)?InpHullM1_UpColor:(g_hullDirM1==-1)?InpHullM1_DnColor:clrSilver;
+         ObjectSetString (0, DASH_PREFIX+"B_R2", OBJPROP_TEXT,
+                          StringFormat("Hull M1%s M15%s Slp:%+.3f", m1s, m15s, g_hullSlopeM15));
+         ObjectSetInteger(0, DASH_PREFIX+"B_R2", OBJPROP_COLOR, hClr);
+      }
+      // R3: NR MA direction
+      {
+         string nrTxt = (g_nrMADir==1)?"NR MA: UP  ▲":(g_nrMADir==-1)?"NR MA: DN  ▼":"NR MA: ─";
+         color  nrClr = (g_nrMADir==1)?clrLime:(g_nrMADir==-1)?clrTomato:clrSilver;
+         ObjectSetString (0, DASH_PREFIX+"B_R3", OBJPROP_TEXT,  nrTxt);
+         ObjectSetInteger(0, DASH_PREFIX+"B_R3", OBJPROP_COLOR, nrClr);
+      }
+      // R4: DXY / GOLD correlation
+      {
+         int dxyDir  = GetDXYTrendDirection();
+         int goldDir = GetGoldTrendDirection();
+         string dTxt = (dxyDir== 1)?"DXY:▲":(dxyDir==-1)?"DXY:▼":"DXY:─";
+         string gTxt = (goldDir==1)?"GOLD:▲":(goldDir==-1)?"GOLD:▼":"GOLD:─";
+         bool ok = (dxyDir!=0 && goldDir!=0 && dxyDir!=goldDir);
+         color  dClr = ok?clrLime:(dxyDir==0||goldDir==0)?clrSilver:clrYellow;
+         ObjectSetString (0, DASH_PREFIX+"B_R4", OBJPROP_TEXT,
+                          StringFormat("%s  %s  %s", dTxt, gTxt, ok?"OK":"CONFLICT"));
+         ObjectSetInteger(0, DASH_PREFIX+"B_R4", OBJPROP_COLOR, dClr);
+      }
+      // R5: Spread
+      {
+         double spUSD = GetSpreadUSD();
+         SessionProfile sp = GetActiveProfile();
+         bool   wide  = (sp.maxSpreadUSD > 0 && spUSD > sp.maxSpreadUSD);
+         ObjectSetString (0, DASH_PREFIX+"B_R5", OBJPROP_TEXT,
+                          StringFormat("Spread: $%.3f%s", spUSD, wide?" ⚠️":""));
+         ObjectSetInteger(0, DASH_PREFIX+"B_R5", OBJPROP_COLOR, wide?clrTomato:clrSilver);
+      }
    }
-   ObjectSetString (0, DASH_PREFIX+"STRUCT", OBJPROP_TEXT,  structTxt);
-   ObjectSetInteger(0, DASH_PREFIX+"STRUCT", OBJPROP_COLOR, structClr);
 
-   // 4. วิเคราะห์ Momentum & Fibo Insight จาก OFA p26 (Fast Fractal)
-   string momentumText = "Momentum: Calculating..."; 
-   string insightText = "Advice: Scanning...";
-   
-   if(gdx_swingCount > 1) {
-      GDX_SwingPoint s1 = gdx_swings[gdx_swingCount-2]; // จุดเริ่มต้นของขาปัจจุบัน
-      GDX_SwingPoint s2 = gdx_swings[gdx_swingCount-1]; // จุดสิ้นสุด (High/Low ล่าสุด)
-      
-      double range = MathAbs(s1.price - s2.price);
-      double retrace = 0;
-      if(range > 0) retrace = (MathAbs(curPrice - s2.price) / range) * 100.0;
-      
-      momentumText = StringFormat("Momentum: %s (Retrace: %.1f%%)", (s2.isHigh ? "Bullish" : "Bearish"), retrace);
-      insightText = "Advice: " + GetFiboMeaning(retrace);
+   // ─── Liquidity Radar (Panel D — updated here on throttle) ───
+   {
+      double distH = (nearH > 0) ? (nearH - curPrice) / _Point : 0;
+      double distL = (nearL > 0) ? (curPrice - nearL) / _Point : 0;
+      color  radarClr = ((distH>0&&distH<400)||(distL>0&&distL<400)) ? clrYellow : clrSilver;
+      ObjectSetString (0, DASH_PREFIX+"RADAR_H", OBJPROP_TEXT,
+                       StringFormat("EQH x%d +%.0fpt  |  EQL x%d -%.0fpt",
+                                    countH_CTF+countH_HTF, distH, countL_CTF+countL_HTF, distL));
+      ObjectSetInteger(0, DASH_PREFIX+"RADAR_H", OBJPROP_COLOR, radarClr);
    }
-   ObjectSetString(0, DASH_PREFIX+"MOMENTUM", OBJPROP_TEXT, momentumText);
-   ObjectSetString(0, DASH_PREFIX+"INSIGHT",  OBJPROP_TEXT, insightText);
 
-   // 5. Liquidity Radar (รวมบรรทัดเดียว)
-   double distH = (nearH > 0) ? (nearH - curPrice) / _Point : 0;
-   double distL = (nearL > 0) ? (curPrice - nearL) / _Point : 0;
-   string strRadar = StringFormat("EQH x%d +%.0fpt  |  EQL x%d -%.0fpt",
-                                  countH_CTF + countH_HTF, distH,
-                                  countL_CTF + countL_HTF, distL);
-   ObjectSetString(0, DASH_PREFIX+"RADAR_H", OBJPROP_TEXT, strRadar);
-
-   // 6. สถานะแจ้งเตือนพิเศษ
-   string status = "STATUS: MONITORING"; color statClr = clrSilver;
-   if((distH > 0 && distH < 400) || (distL > 0 && distL < 400)) { status = "STATUS: ⚠️ NEAR LIQUIDITY ZONE"; statClr = clrYellow; }
-   
-   ObjectSetString(0, DASH_PREFIX+"STATUS", OBJPROP_TEXT, status);
-   ObjectSetInteger(0, DASH_PREFIX+"STATUS", OBJPROP_COLOR, statClr);
-   
-   // --- [ADD] Smart Trade Plan Calculation Logic ---
+   // ─── Trade Plan (g_poiPrice / g_targetPrice / g_isBullStructure) ───
    g_targetPrice     = 0;
    g_poiPrice        = 0;
    g_isBullStructure = (gdx_swingCount2 > 1 && gdx_swings2[gdx_swingCount2-1].isHigh);
-   string tradeAction = "WAITING...";
-   color actionClr = clrWhite;
 
-   // --- อัปเดต p50 Swing Low ล่าสุด (สำหรับ Structure Break check) ---
    g_p50LastLow = 0.0;
    for(int i = gdx_swingCount2 - 1; i >= 0; i--) {
       if(!gdx_swings2[i].isHigh) { g_p50LastLow = gdx_swings2[i].price; break; }
    }
-
-   // 2. ค้นหา Next Target (จาก HTF EQH/EQL ที่ยังไม่ถูกกวาด)
    if(InpEnableHTF) {
       for(int i=0; i<ArraySize(g_zones_htf); i++) {
          if(g_zones_htf[i].isSwept) continue;
          if(g_isBullStructure && g_zones_htf[i].isHigh && g_zones_htf[i].sweepLevel > curPrice) {
-            if(g_targetPrice == 0 || g_zones_htf[i].sweepLevel < g_targetPrice) g_targetPrice = g_zones_htf[i].sweepLevel;
-         }
-         else if(!g_isBullStructure && !g_zones_htf[i].isHigh && g_zones_htf[i].sweepLevel < curPrice) {
-            if(g_targetPrice == 0 || g_zones_htf[i].sweepLevel > g_targetPrice) g_targetPrice = g_zones_htf[i].sweepLevel;
+            if(g_targetPrice==0 || g_zones_htf[i].sweepLevel < g_targetPrice) g_targetPrice = g_zones_htf[i].sweepLevel;
+         } else if(!g_isBullStructure && !g_zones_htf[i].isHigh && g_zones_htf[i].sweepLevel < curPrice) {
+            if(g_targetPrice==0 || g_zones_htf[i].sweepLevel > g_targetPrice) g_targetPrice = g_zones_htf[i].sweepLevel;
          }
       }
    }
-
-   // 3. ค้นหา POI (Entry จุดที่ราคาควรจะ Pullback ลงมาทดสอบ - M1 Unswept Liquidity)
    for(int i=0; i<ArraySize(g_zones); i++) {
       if(g_zones[i].isSwept) continue;
       if(g_isBullStructure && !g_zones[i].isHigh && g_zones[i].sweepLevel < curPrice) {
-         if(g_poiPrice == 0 || g_zones[i].sweepLevel > g_poiPrice) g_poiPrice = g_zones[i].sweepLevel;
-      }
-      else if(!g_isBullStructure && g_zones[i].isHigh && g_zones[i].sweepLevel > curPrice) {
-         if(g_poiPrice == 0 || g_zones[i].sweepLevel < g_poiPrice) g_poiPrice = g_zones[i].sweepLevel;
+         if(g_poiPrice==0 || g_zones[i].sweepLevel > g_poiPrice) g_poiPrice = g_zones[i].sweepLevel;
+      } else if(!g_isBullStructure && g_zones[i].isHigh && g_zones[i].sweepLevel > curPrice) {
+         if(g_poiPrice==0 || g_zones[i].sweepLevel < g_poiPrice) g_poiPrice = g_zones[i].sweepLevel;
       }
    }
-   // sync local aliases สำหรับโค้ดด้านล่าง
-   double poiPrice        = g_poiPrice;
-   double targetPrice     = g_targetPrice;
-   bool   isBullStructure = g_isBullStructure;
 
-   // 4. สรุป Trade Action
-   if(isBullStructure) {
-      tradeAction = "🔵 BUY ON DIP (Long Focus)";
-      actionClr = clrDeepSkyBlue;
+   // คำนวณ Retrace และบันทึก global
+   if(gdx_swingCount > 1) {
+      GDX_SwingPoint s1 = gdx_swings[gdx_swingCount-2];
+      GDX_SwingPoint s2 = gdx_swings[gdx_swingCount-1];
+      double range = MathAbs(s1.price - s2.price);
+      g_lastRetrace = (range > 0) ? (MathAbs(curPrice - s2.price) / range) * 100.0 : 0;
    } else {
-      tradeAction = "🔴 SELL ON RALLY (Short Focus)";
-      actionClr = clrTomato;
+      g_lastRetrace = 0;
    }
 
-   // 5. Action + POI + Target (รวมบรรทัดเดียว)
-   string poiStr = (poiPrice > 0) ? DoubleToString(poiPrice, _Digits) : "---";
-   string tgtStr = (targetPrice > 0) ? DoubleToString(targetPrice, _Digits) : "---";
-   string actionSym = isBullStructure ? "BUY" : "SELL";
-   ObjectSetString (0, DASH_PREFIX+"ACTION", OBJPROP_TEXT,
-                    StringFormat("%s  POI %s -> TGT %s", actionSym, poiStr, tgtStr));
-   ObjectSetInteger(0, DASH_PREFIX+"ACTION", OBJPROP_COLOR, actionClr);
-
-   // Confluence
-   bool m1MomentumUp = (gdx_swingCount > 0 && gdx_swings[gdx_swingCount-1].isHigh);
-   string confluence = (m1MomentumUp == isBullStructure) ? "Conf: **** Aligned" : "Conf: ** Wait Rejection";
-   ObjectSetString(0, DASH_PREFIX+"CONF", OBJPROP_TEXT, confluence);
-
-   // --- Hull M1 + M15 (รวมบรรทัดเดียว) ---
-   string hullTxt = "Hull";
-   color  hullClr = clrSilver;
-   if(InpHullM1_Enable) {
-      if(g_hullDirM1 == 1)       { hullTxt += "  M1UP";  hullClr = InpHullM1_UpColor; }
-      else if(g_hullDirM1 == -1) { hullTxt += "  M1DN";  hullClr = InpHullM1_DnColor; }
-      else                        { hullTxt += "  M1--"; }
-   }
-   if(InpHullM15_Enable) {
-      if(g_hullDirM15 == 1)       { hullTxt += "  M15UP";  if(hullClr==clrSilver) hullClr = InpHullM15_UpColor; }
-      else if(g_hullDirM15 == -1) { hullTxt += "  M15DN";  if(hullClr==clrSilver) hullClr = InpHullM15_DnColor; }
-      else                         { hullTxt += "  M15--"; }
-   }
-   ObjectSetString (0, DASH_PREFIX+"HULL_M1", OBJPROP_TEXT,  hullTxt);
-   ObjectSetInteger(0, DASH_PREFIX+"HULL_M1", OBJPROP_COLOR, hullClr);
-
-   // --- [ADD] เรียกใช้การวาดวงกลม GPS Markers ต่อท้าย UpdateDashboard ---
-   DrawTradeMarkers(poiPrice, targetPrice, isBullStructure);
+   DrawTradeMarkers(g_poiPrice, g_targetPrice, g_isBullStructure);
 }
 //+------------------------------------------------------------------+
 //|  DELETE all chart objects belonging to a zone                    |
@@ -3627,103 +3679,93 @@ int OnInit()
 //      CreateDashLabel(DASH_PREFIX+"TARGET",   y_start + 60, "Next Target: ---", clrDodgerBlue);
 //      CreateDashLabel(DASH_PREFIX+"CONF",     y_start + 80, "Confluence: ---", clrYellow);
 //   }
-// --- Dashboard Initialization (Layout: WN → Market Context → EA Status) ---
+// --- Dashboard Initialization V.2.09 (4-Panel layout) ---
 if(InpShowDash) {
-      // ─── Panel 1: WHAT'S NEXT (บนสุด — Decision Making) ───
-      string bgWN = DASH_PREFIX+"BG_WN";
-      ObjectDelete(0, bgWN);
-      ObjectCreate(0, bgWN, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, bgWN, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, bgWN, OBJPROP_XDISTANCE, InpDashX);
-      ObjectSetInteger(0, bgWN, OBJPROP_YDISTANCE, InpDashY);
-      ObjectSetInteger(0, bgWN, OBJPROP_XSIZE,     390);
-      ObjectSetInteger(0, bgWN, OBJPROP_YSIZE,     165);
-      ObjectSetInteger(0, bgWN, OBJPROP_BGCOLOR,   C'10,10,25');
-      ObjectSetInteger(0, bgWN, OBJPROP_FILL,      true);
-      ObjectSetInteger(0, bgWN, OBJPROP_BACK,      false);
-      ObjectSetInteger(0, bgWN, OBJPROP_SELECTABLE,false);
-
-      int yw = InpDashY + 4;
-      CreateDashLabel(DASH_PREFIX+"WN_HDR",      yw,      "── STRATEGIC WHAT'S NEXT ──", clrAqua,   9, true);
-      CreateDashLabel(DASH_PREFIX+"WN_SELL_ROW", yw+14,   "SELL | --",                   clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_BUY_ROW",  yw+28,   "BUY  | --",                   clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_LINE",     yw+41,   "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"WN_SELL_STS", yw+51,   "SELL Status: --",              clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_BUY_STS",  yw+65,   "BUY  Status: --",              clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_LINE2",    yw+78,   "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"WN_TARGET",   yw+88,   "Target: --",                   clrAqua,   9);
-      CreateDashLabel(DASH_PREFIX+"WN_RR",       yw+102,  "Est. R:R  --",                 clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_SPREAD",   yw+116,  "Spread: --",                   clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"WN_PROB_BAR", yw+130,  "Confluence: --",               clrSilver, 9);
-
-      // ─── Panel 2: MARKET CONTEXT (กลาง — Monitoring) ───
-      int ctxY = InpDashY + 173;
-      int y    = ctxY;
-
-      string bgName = DASH_PREFIX+"BG";
-      ObjectDelete(0, bgName);
-      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, bgName, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE,  InpDashX);
-      ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE,  ctxY);
-      ObjectSetInteger(0, bgName, OBJPROP_XSIZE,      390);
-      ObjectSetInteger(0, bgName, OBJPROP_YSIZE,      232);
-      ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR,    clrBlack);
-      ObjectSetInteger(0, bgName, OBJPROP_FILL,       true);
-      ObjectSetInteger(0, bgName, OBJPROP_BACK,       false);
-      ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
-
-      CreateDashLabel(DASH_PREFIX+"TITLE",      y +  5, "", clrWhite,  9, true);
-      CreateDashLabel(DASH_PREFIX+"EMA_STATUS", y + 17, "EMA: --", clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"LINE1",      y + 29, "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"STRUCT",     y + 39, "", clrWhite,  9);
-      CreateDashLabel(DASH_PREFIX+"HULL_M1",    y + 53, "Hull: ...",   clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"MOMENTUM",   y + 67, "", clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"INSIGHT",    y + 81, "", clrYellow, 9);
-      CreateDashLabel(DASH_PREFIX+"LINE2",      y + 93, "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"RADAR_H",    y +103, "", clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"STATUS",     y +117, "", clrWhite,  9, true);
-      CreateDashLabel(DASH_PREFIX+"LINE3",      y +129, "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"ACTION",     y +139, "", clrWhite,  9);
-      CreateDashLabel(DASH_PREFIX+"CONF",       y +153, "", clrYellow, 9);
-      CreateDashLabel(DASH_PREFIX+"LINE4",      y +165, "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"CLUSTER",    y +175, "Scanning...", clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"SWEPT",      y +189, "Swept: -",    clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"DECISION",   y +203, "◉ SCANNING",  clrSilver, 9, true);
-
-      // ─── Panel 3: EA ORDER STATUS (ล่าง — Monitoring) ───
-      string bgEA = DASH_PREFIX+"BG_EA";
-      ObjectDelete(0, bgEA);
-      ObjectCreate(0, bgEA, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, bgEA, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, bgEA, OBJPROP_XDISTANCE, InpDashX);
-      ObjectSetInteger(0, bgEA, OBJPROP_YDISTANCE, InpDashY + 401);
-      ObjectSetInteger(0, bgEA, OBJPROP_XSIZE,     390);
-      ObjectSetInteger(0, bgEA, OBJPROP_YSIZE,     240);
-      ObjectSetInteger(0, bgEA, OBJPROP_BGCOLOR,   C'10,20,10');
-      ObjectSetInteger(0, bgEA, OBJPROP_FILL,      true);
-      ObjectSetInteger(0, bgEA, OBJPROP_BACK,      false);
-      ObjectSetInteger(0, bgEA, OBJPROP_SELECTABLE,false);
-
-      int ye = InpDashY + 405;
-      CreateDashLabel(DASH_PREFIX+"EA_HDR",      ye,     "── EA ORDER STATUS ──",    clrAqua,   9, true);
-      CreateDashLabel(DASH_PREFIX+"EA_BIAS",     ye+14,  "Master Bias: --",          clrSilver, 9, true);
-      CreateDashLabel(DASH_PREFIX+"DXY_TREND",   ye+28,  "DXY Monitor: --",          clrSilver, 9, true);
-      CreateDashLabel(DASH_PREFIX+"EA_SESSION",  ye+44,  "Session: --",              clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_STREAK",   ye+58,  "Streak: EQL 0 | EQH 0",   clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_LINE",     ye+70,  "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"EA_BUY",      ye+80,  "BUY  Open: 0/2",           clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_SELL",     ye+94,  "SELL Open: 0/2",           clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_LINE2",    ye+106, "────────────────────────────────────────", clrGray);
-      CreateDashLabel(DASH_PREFIX+"EA_LASTBUY",  ye+116, "Last BUY : --",            clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_LASTSELL", ye+130, "Last SELL: --",            clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_PNL",      ye+144, "Total P/L : --",           clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_PENDING",  ye+158, "Pending: none",             clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_CRITICAL", ye+172, " ",                         clrSilver, 9);
-      CreateDashLabel(DASH_PREFIX+"EA_STATUS",   ye+186, "◉ EA READY",               clrLime,   9, true);
-      CreateDashLabel(DASH_PREFIX+"EA_M1SLOPE",  ye+200, "M1 Slope: --",   clrSilver, 8);
-      CreateDashLabel(DASH_PREFIX+"EA_HULL_GAP", ye+214, "Hull M1 Gap: --", clrSilver, 8);
+   // ─── Panel A: Signal Header ───
+   if(InpShowDash_Signal) {
+      DashMakePanel(DASH_PREFIX+"BG_A", InpDashY, 52, C'15,15,35');
+      int ya = InpDashY + 6;
+      CreateDashLabel(DASH_PREFIX+"A_HDR",    ya,    "DLZ_EA V.2.09 | -- | --",  clrAqua,   9, true);
+      CreateDashLabel(DASH_PREFIX+"A_STATUS", ya+16, "Session: -- | --",          clrSilver, 9);
+      CreateDashLabel(DASH_PREFIX+"A_EMA",    ya+30, "EMA: --",                   clrSilver, 9);
    }
+
+   // ─── Panel B: Entry Modes + Market Bias (2-column) ───
+   if(InpShowDash_Modes) {
+      int y_b = InpDashY + 58;
+      DashMakePanel(DASH_PREFIX+"BG_B", y_b, 106, C'10,10,20');
+      int xL = InpDashX + 15;
+      int xR = InpDashX + 225;
+      // Left column
+      CreateDashLabelAt(DASH_PREFIX+"B_LHDR", xL, y_b+5,  "─ ENTRY MODES ─",   clrAqua,  9, true);
+      CreateDashLabelAt(DASH_PREFIX+"B_L1",   xL, y_b+20, "Zone Entry  --",     clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_L2",   xL, y_b+34, "Cluster     --",     clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_L3",   xL, y_b+48, "NR Mode4    --",     clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_L4",   xL, y_b+62, "Direct Ent  --",     clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_L5",   xL, y_b+76, "Auto Pend   --",     clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_L6",   xL, y_b+90, "Fibo Filter --",     clrSilver,9);
+      // Right column
+      CreateDashLabelAt(DASH_PREFIX+"B_RHDR", xR, y_b+5,  "─ MARKET BIAS ─",   clrAqua,  9, true);
+      CreateDashLabelAt(DASH_PREFIX+"B_R1",   xR, y_b+20, "Struct: --",         clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_R2",   xR, y_b+34, "Hull: --",           clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_R3",   xR, y_b+48, "NR MA: --",          clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_R4",   xR, y_b+62, "DXY: --",            clrSilver,9);
+      CreateDashLabelAt(DASH_PREFIX+"B_R5",   xR, y_b+76, "Spread: --",         clrSilver,9);
+   }
+
+   // ─── Panel C: What's Next ───
+   if(InpShowDash_WN) {
+      int y_c = InpDashY + 170;
+      DashMakePanel(DASH_PREFIX+"BG_C", y_c, 178, C'10,10,25');
+      int yc = y_c + 5;
+      CreateDashLabel(DASH_PREFIX+"WN_HDR",      yc,     "── WHAT'S NEXT ──",                      clrAqua,  9, true);
+      CreateDashLabel(DASH_PREFIX+"WN_SELL_ROW", yc+14,  "SELL | --",                              clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_BUY_ROW",  yc+28,  "BUY  | --",                              clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_LINE",     yc+41,  "──────────────────────────────────────────", clrGray);
+      CreateDashLabel(DASH_PREFIX+"WN_SELL_STS", yc+51,  "SELL Status: --",                        clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_BUY_STS",  yc+65,  "BUY  Status: --",                        clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_LINE2",    yc+78,  "──────────────────────────────────────────", clrGray);
+      CreateDashLabel(DASH_PREFIX+"WN_TARGET",   yc+88,  "Target: --",                             clrAqua,  9);
+      CreateDashLabel(DASH_PREFIX+"WN_RR",       yc+102, "Est. R:R  --",                           clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_SPREAD",   yc+116, "-- | Spread: --",                        clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_LINE3",    yc+129, "──────────────────────────────────────────", clrGray);
+      CreateDashLabel(DASH_PREFIX+"WN_RETRACE",  yc+139, "Retrace: --",                            clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"WN_PROB_BAR", yc+153, "Confidence: --",                         clrSilver,9);
+   }
+
+   // ─── Panel D: Positions & Market ───
+   if(InpShowDash_Orders) {
+      int y_d = InpDashY + 354;
+      DashMakePanel(DASH_PREFIX+"BG_D", y_d, 225, C'10,20,10');
+      int yd = y_d + 5;
+      CreateDashLabel(DASH_PREFIX+"EA_HDR",    yd,      "── POSITIONS & MARKET ──",               clrAqua,  9, true);
+      CreateDashLabel(DASH_PREFIX+"EA_BUY",    yd+14,   "BUY  0/2",                               clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_SELL",   yd+28,   "SELL 0/2",                               clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_STREAK", yd+42,   "Streak  EQL 0 | EQH 0",                  clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_PNL",    yd+56,   "P/L: --",                                clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_PENDING",yd+70,   "Pending: none",                          clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_LINE",   yd+83,   "──────────────────────────────────────────", clrGray);
+      CreateDashLabel(DASH_PREFIX+"RADAR_H",   yd+93,   "EQH -- | EQL --",                        clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"CLUSTER",   yd+107,  "Cluster: --",                            clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"SWEPT",     yd+121,  "Swept: -",                               clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"DECISION",  yd+135,  "◉ SCANNING",                             clrSilver,9, true);
+      CreateDashLabel(DASH_PREFIX+"EA_LINE2",  yd+148,  "──────────────────────────────────────────", clrGray);
+      CreateDashLabel(DASH_PREFIX+"EA_MKTCOND",yd+158,  "MktCond: --",                            clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_DAYRUN", yd+172,  "DayRun : --",                            clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_SESSION",yd+186,  "SynM15 Slope: --",                       clrSilver,9);
+      CreateDashLabel(DASH_PREFIX+"EA_STATUS", yd+200,  "◉ EA READY",                             clrLime,  9, true);
+   }
+
+   // ─── Debug Panel ───
+   if(InpShowDash_Debug) {
+      int y_dbg = InpDashY + 585;
+      DashMakePanel(DASH_PREFIX+"BG_DBG", y_dbg, 50, C'25,10,10');
+      int ydbg = y_dbg + 5;
+      CreateDashLabel(DASH_PREFIX+"DBG_HDR",    ydbg,    "── DEBUG ──",           clrOrangeRed,9, true);
+      CreateDashLabel(DASH_PREFIX+"EA_M1SLOPE", ydbg+14, "Hull M1: --",           clrSilver,   8);
+      CreateDashLabel(DASH_PREFIX+"EA_HULL_GAP",ydbg+28, "Hull Gap: --",          clrSilver,   8);
+   }
+}
 
    // --- EA Init ---
    g_trade.SetExpertMagicNumber(InpMagicNumber);
@@ -4127,6 +4169,11 @@ void CheckNRArrowEntry(int dir, datetime barTime, double barHigh, double barLow)
          if(p50Bull)              { Print("[NR Mode4] SELL blocked — p50 BULLISH"); return; }
       }
       if(CountOpenOrders(POSITION_TYPE_SELL) >= InpMaxSell) { Print("[NR Mode4] SELL blocked — max orders"); return; }
+      { // Hard Fibo zone check — always active (bypass swingCount/InpFiboFilter guard)
+         double _fiboHard = GetFiboP26Pct(SymbolInfoDouble(_Symbol, SYMBOL_BID), true);
+         if(_fiboHard >= 0.0 && _fiboHard > 85.0)  { PrintFormat("[NR Mode4] SELL Blocked — FiboP26:%.1f%% > 85%%", _fiboHard); return; }
+         if(_fiboHard >= 0.0 && _fiboHard < 38.2)  { PrintFormat("[NR Mode4] SELL Blocked — FiboP26:%.1f%% < 38.2%% (not in zone)", _fiboHard); return; }
+      }
       if(InpFiboFilter && (gdx_swingCount > 1 || gdx_swingCount2 > 1)) {
          double fiboP26 = GetFiboP26Pct(SymbolInfoDouble(_Symbol, SYMBOL_BID), true);
          double fiboFx  = GetSwingFiboPct(SymbolInfoDouble(_Symbol, SYMBOL_BID), true);
@@ -6308,7 +6355,7 @@ string GetEntryBlockReason(bool isBuy)
 //+------------------------------------------------------------------+
 void UpdateWhatNextDashboard()
 {
-   if(!InpShowDash) return;
+   if(!InpShowDash || !InpShowDash_WN) return;
 
    bool p50Bull = (gdx_swingCount2 > 1 && gdx_swings2[gdx_swingCount2-1].isHigh);
    int  buyBias  = GetBiasScore(true);
@@ -6395,6 +6442,23 @@ void UpdateWhatNextDashboard()
       ObjectSetInteger(0, DASH_PREFIX+"WN_SPREAD", OBJPROP_COLOR, stateClr);
    }
 
+   // --- Retrace% + Fibo Zone Check (ใช้ g_lastRetrace ที่คำนวณใน UpdateDashboard) ---
+   {
+      double rt   = g_lastRetrace;
+      bool   valid = (rt >= 38.2 && rt <= 85.0);
+      string rtTxt; color rtClr;
+      if(rt <= 0) {
+         rtTxt = "Retrace: --  (no swing data)"; rtClr = clrGray;
+      } else {
+         string zone = valid ? "VALID [38-85%]" :
+                       (rt < 38.2) ? "TOO EARLY (<38%)" : "OVEREXTENDED (>85%)";
+         rtTxt = StringFormat("Retrace: %.1f%%  %s", rt, zone);
+         rtClr = valid ? clrLime : clrTomato;
+      }
+      ObjectSetString (0, DASH_PREFIX+"WN_RETRACE", OBJPROP_TEXT,  rtTxt);
+      ObjectSetInteger(0, DASH_PREFIX+"WN_RETRACE", OBJPROP_COLOR, rtClr);
+   }
+
    // --- AI Confidence bar (ใช้ setup score ฝั่งที่ bias ดีกว่า) ---
    int bestBias  = MathMax(buyBias,  sellBias);
    int bestSetup = (buyBias >= sellBias) ? buySetup : sellSetup;
@@ -6420,161 +6484,174 @@ void UpdateEADashboard()
 {
    if(!InpShowDash) return;
 
-   // Bias / DXY ย้ายไป WN panel แล้ว — ล้างให้ว่าง
-   ObjectSetString(0, DASH_PREFIX+"EA_BIAS",    OBJPROP_TEXT, " ");
-   ObjectSetString(0, DASH_PREFIX+"DXY_TREND",  OBJPROP_TEXT, " ");
-   ObjectSetString(0, DASH_PREFIX+"EA_CRITICAL",OBJPROP_TEXT, " ");
-
-   // SynM15 Slope (ยังคงแสดง — ช่วย debug Hull)
-   {
-      string slopeSign = (g_hullSlopeM15 > 0) ? "+" : "";
-      string slopeTxt  = StringFormat("SynM15 Slope: %s%.4f  M15:%s M1:%s",
-                                      slopeSign, g_hullSlopeM15,
-                                      g_hullDirM15==1?"▲":g_hullDirM15==-1?"▼":"─",
-                                      g_hullDirM1 ==1?"▲":g_hullDirM1 ==-1?"▼":"─");
-      color slopeClr = (g_hullSlopeM15 > 0) ? clrLime : (g_hullSlopeM15 < 0) ? clrTomato : clrSilver;
-      ObjectSetString (0, DASH_PREFIX+"EA_SESSION", OBJPROP_TEXT,  slopeTxt);
-      ObjectSetInteger(0, DASH_PREFIX+"EA_SESSION", OBJPROP_COLOR, slopeClr);
+   // ─── Panel A: Session / EA Status / Live badge ───
+   if(InpShowDash_Signal) {
+      string eaStatus;
+      color  eaClr;
+      if(!InpEA_Enable) {
+         eaStatus = "◎ EA OFF"; eaClr = clrSilver;
+      } else if(g_TradingStatus == "PAUSED BY NEWS") {
+         eaStatus = "⏸ " + g_TradingStatus; eaClr = g_StatusColor;
+      } else if(g_TradingStatus == "SESSION CLOSED" || g_TradingStatus == "WEEKEND CLOSED") {
+         eaStatus = "🔒 " + g_TradingStatus; eaClr = g_StatusColor;
+      } else {
+         eaStatus = "◉ EA ACTIVE"; eaClr = clrLime;
+      }
+      string liveTag = g_isLive ? "[LIVE]" : "[BACKTEST]";
+      color  liveClr = g_isLive ? clrLime  : clrGold;
+      string aStatusTxt = StringFormat("Session: %s  |  %s  |  %s",
+                                       GetSessionName(), eaStatus, liveTag);
+      ObjectSetString (0, DASH_PREFIX+"A_STATUS", OBJPROP_TEXT,  aStatusTxt);
+      ObjectSetInteger(0, DASH_PREFIX+"A_STATUS", OBJPROP_COLOR, eaClr);
+      // also color EA_STATUS in Panel D if visible
+      if(InpShowDash_Orders) {
+         ObjectSetString (0, DASH_PREFIX+"EA_STATUS", OBJPROP_TEXT,  eaStatus + "  " + liveTag);
+         ObjectSetInteger(0, DASH_PREFIX+"EA_STATUS", OBJPROP_COLOR, eaClr);
+      }
    }
 
-   // Streak
-   string eqlIcons = "", eqhIcons = "";
-   for(int i = 0; i < g_eql_streak; i++) eqlIcons += "🟢";
-   for(int i = 0; i < g_eqh_streak; i++) eqhIcons += "🔴";
-   color streakClr = (g_eql_streak >= InpEQL_Streak3rd || g_eqh_streak >= InpEQH_Streak)
-                     ? clrYellow : clrSilver;
-   ObjectSetString (0, DASH_PREFIX+"EA_STREAK", OBJPROP_TEXT,
-                    StringFormat("Streak  EQL %d%s | EQH %d%s", g_eql_streak, eqlIcons, g_eqh_streak, eqhIcons));
-   ObjectSetInteger(0, DASH_PREFIX+"EA_STREAK", OBJPROP_COLOR, streakClr);
+   if(!InpShowDash_Orders) { UpdateWhatNextDashboard(); return; }
 
-   // BUY positions
+   // ─── Panel D: Positions ───
+
+   // BUY / SELL position counts
    int openBuy  = CountOpenOrders(POSITION_TYPE_BUY);
-   color buyClr = (openBuy >= InpMaxBuy) ? clrOrangeRed : clrLime;
-   ObjectSetString (0, DASH_PREFIX+"EA_BUY", OBJPROP_TEXT,
-                    StringFormat("BUY  Positions: %d / %d%s", openBuy, InpMaxBuy,
-                                 openBuy >= InpMaxBuy ? "  MAX" : ""));
-   ObjectSetInteger(0, DASH_PREFIX+"EA_BUY", OBJPROP_COLOR, buyClr);
-
-   // SELL positions
    int openSell = CountOpenOrders(POSITION_TYPE_SELL);
+   SessionProfile prof = GetActiveProfile();
+
+   color buyClr  = (openBuy  >= InpMaxBuy)  ? clrOrangeRed : clrLime;
    color sellClr = (openSell >= InpMaxSell) ? clrOrangeRed : clrTomato;
-   string sellWait = (g_eqh_streak > 0 && g_eqh_streak < InpEQH_Streak)
-                     ? StringFormat("  (wait %d/%d)", g_eqh_streak, InpEQH_Streak) : "";
+   string buyWait  = (openBuy  >= InpMaxBuy)  ? "  MAX" : "";
+   string sellWait = (openSell >= InpMaxSell) ? "  MAX" :
+                     (g_eqh_streak > 0 && g_eqh_streak < prof.eqhStreak)
+                     ? StringFormat("  (EQH %d/%d)", g_eqh_streak, prof.eqhStreak) : "";
+   ObjectSetString (0, DASH_PREFIX+"EA_BUY",  OBJPROP_TEXT,
+                    StringFormat("BUY  %d/%d%s", openBuy,  InpMaxBuy,  buyWait));
+   ObjectSetInteger(0, DASH_PREFIX+"EA_BUY",  OBJPROP_COLOR, buyClr);
    ObjectSetString (0, DASH_PREFIX+"EA_SELL", OBJPROP_TEXT,
-                    StringFormat("SELL Positions: %d / %d%s%s", openSell, InpMaxSell,
-                                 openSell >= InpMaxSell ? "  MAX" : "", sellWait));
+                    StringFormat("SELL %d/%d%s", openSell, InpMaxSell, sellWait));
    ObjectSetInteger(0, DASH_PREFIX+"EA_SELL", OBJPROP_COLOR, sellClr);
 
-   // Last BUY / SELL tickets
-   double lastBuyEntry = 0, lastBuyTP = 0, lastBuySL = 0;
-   double lastSellEntry = 0, lastSellTP = 0, lastSellSL = 0;
-   for(int i = 0; i < PositionsTotal(); i++) {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC)  != InpMagicNumber) continue;
-      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) {
-         lastBuyEntry = PositionGetDouble(POSITION_PRICE_OPEN);
-         lastBuyTP    = PositionGetDouble(POSITION_TP);
-         lastBuySL    = PositionGetDouble(POSITION_SL);
-      }
-      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL) {
-         lastSellEntry = PositionGetDouble(POSITION_PRICE_OPEN);
-         lastSellTP    = PositionGetDouble(POSITION_TP);
-         lastSellSL    = PositionGetDouble(POSITION_SL);
-      }
-   }
-   if(lastBuyEntry > 0)
-      ObjectSetString(0, DASH_PREFIX+"EA_LASTBUY", OBJPROP_TEXT,
-                      StringFormat("Last BUY : %.3f  TP:%.3f  SL:%.3f", lastBuyEntry, lastBuyTP, lastBuySL));
-   if(lastSellEntry > 0)
-      ObjectSetString(0, DASH_PREFIX+"EA_LASTSELL", OBJPROP_TEXT,
-                      StringFormat("Last SELL: %.3f  TP:%.3f  SL:%.3f", lastSellEntry, lastSellTP, lastSellSL));
+   // Streak (with threshold hint)
+   string eqlIcons = "", eqhIcons = "";
+   for(int i = 0; i < g_eql_streak; i++) eqlIcons += "o";
+   for(int i = 0; i < g_eqh_streak; i++) eqhIcons += "o";
+   color streakClr = (g_eql_streak >= prof.eqlStreak || g_eqh_streak >= prof.eqhStreak)
+                     ? clrYellow : clrSilver;
+   ObjectSetString (0, DASH_PREFIX+"EA_STREAK", OBJPROP_TEXT,
+                    StringFormat("Streak  EQL %d%s(/%d)  |  EQH %d%s(/%d)",
+                                 g_eql_streak, eqlIcons, prof.eqlStreak,
+                                 g_eqh_streak, eqhIcons, prof.eqhStreak));
+   ObjectSetInteger(0, DASH_PREFIX+"EA_STREAK", OBJPROP_COLOR, streakClr);
 
-   // Total P/L
+   // P/L
    double totalPnl = 0;
    for(int i = 0; i < PositionsTotal(); i++) {
       ulong t = PositionGetTicket(i);
       if(!PositionSelectByTicket(t)) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetInteger(POSITION_MAGIC)  != InpMagicNumber) continue;
       totalPnl += PositionGetDouble(POSITION_PROFIT);
    }
-   string pnlTxt = StringFormat("Total P/L : %+.2f USD", totalPnl);
+   string pnlTxt = StringFormat("P/L: %+.2f USD", totalPnl);
    if(InpCloseAllProfit > 0)
-      pnlTxt += StringFormat(" / %.2f", InpCloseAllProfit);
-   color pnlClr = clrSilver;
-   if(totalPnl > 0) {
-      pnlClr = (InpCloseAllProfit > 0 && totalPnl >= InpCloseAllProfit * 0.8) ? clrYellow : clrLime;
-   } else if(totalPnl < 0) {
-      pnlClr = clrTomato;
-   }
+      pnlTxt += StringFormat("  / tgt $%.2f", InpCloseAllProfit);
+   color pnlClr = (totalPnl > 0) ?
+      ((InpCloseAllProfit > 0 && totalPnl >= InpCloseAllProfit * 0.8) ? clrYellow : clrLime)
+      : (totalPnl < 0 ? clrTomato : clrSilver);
    ObjectSetString (0, DASH_PREFIX+"EA_PNL", OBJPROP_TEXT,  pnlTxt);
    ObjectSetInteger(0, DASH_PREFIX+"EA_PNL", OBJPROP_COLOR, pnlClr);
 
-   // Pending Order status
-   if(InpAutoPending) {
-      string pendTxt; color pendClr;
-      if(g_pendingTicket > 0) {
+   // Pending
+   {
+      string pendTxt = "Pending: none"; color pendClr = clrSilver;
+      if(InpAutoPending && g_pendingTicket > 0) {
          string pendType = g_pendingIsBull ? "BuyLimit" : "SellLimit";
          pendTxt = StringFormat("Pending: %s @ %.3f  TP:%.3f", pendType, g_pendingPOI, g_targetPrice);
          pendClr = g_pendingIsBull ? clrDeepSkyBlue : clrTomato;
-      } else {
-         pendTxt = "Pending: none";
-         pendClr = clrSilver;
       }
       ObjectSetString (0, DASH_PREFIX+"EA_PENDING", OBJPROP_TEXT,  pendTxt);
       ObjectSetInteger(0, DASH_PREFIX+"EA_PENDING", OBJPROP_COLOR, pendClr);
    }
 
-   // EA Status (รวม News/Session filter state)
-   string eaStatus;
-   color  eaClr;
-   if(!InpEA_Enable) {
-      eaStatus = "◎ EA OFF"; eaClr = clrSilver;
-   } else if(g_TradingStatus == "PAUSED BY NEWS") {
-      eaStatus = "⏸ " + g_TradingStatus; eaClr = g_StatusColor;
-   } else if(g_TradingStatus == "SESSION CLOSED" || g_TradingStatus == "WEEKEND CLOSED") {
-      eaStatus = "🔒 " + g_TradingStatus; eaClr = g_StatusColor;
-   } else {
-      eaStatus = "◉ EA ACTIVE"; eaClr = clrLime;
-   }
-   ObjectSetString (0, DASH_PREFIX+"EA_STATUS", OBJPROP_TEXT,  eaStatus);
-   ObjectSetInteger(0, DASH_PREFIX+"EA_STATUS", OBJPROP_COLOR, eaClr);
-
-   // --- M1 Slope Comparison ---
+   // SynM15 Slope row
    {
-      string slopeDir; color slopeClr;
-      if     (g_hullValueM1_Curr > g_hullValueM1_Prev) { slopeDir = "UP ▲";     slopeClr = clrSpringGreen; }
-      else if(g_hullValueM1_Curr < g_hullValueM1_Prev) { slopeDir = "DOWN ▼";   slopeClr = clrOrangeRed;   }
-      else                                               { slopeDir = "STEADY ─"; slopeClr = clrSilver;      }
-      ObjectSetString (0, DASH_PREFIX+"EA_M1SLOPE", OBJPROP_TEXT,
-         StringFormat("Hull M1 Value  Prev:%.2f  Curr:%.2f  [%s]",
-                      g_hullValueM1_Prev, g_hullValueM1_Curr, slopeDir));
-      ObjectSetInteger(0, DASH_PREFIX+"EA_M1SLOPE", OBJPROP_COLOR, slopeClr);
+      string slopeTxt = StringFormat("SynM15 Slope: %+.4f  M15:%s M1:%s",
+                                     g_hullSlopeM15,
+                                     g_hullDirM15==1?"▲":g_hullDirM15==-1?"▼":"─",
+                                     g_hullDirM1 ==1?"▲":g_hullDirM1 ==-1?"▼":"─");
+      color slopeClr = (g_hullSlopeM15>0)?clrLime:(g_hullSlopeM15<0)?clrTomato:clrSilver;
+      ObjectSetString (0, DASH_PREFIX+"EA_SESSION", OBJPROP_TEXT,  slopeTxt);
+      ObjectSetInteger(0, DASH_PREFIX+"EA_SESSION", OBJPROP_COLOR, slopeClr);
    }
 
-   // --- Hull M1 Gap Monitoring ---
+   // MktCond + DayRun
    {
+      double atrBuf[1]; double atrD1USD = 0;
+      if(g_atr_d1_handle != INVALID_HANDLE && CopyBuffer(g_atr_d1_handle,0,0,1,atrBuf)==1)
+         atrD1USD = atrBuf[0] / 10.0;
+
+      double dayHigh  = iHigh(_Symbol, PERIOD_D1, 0);
+      double dayLow   = iLow (_Symbol, PERIOD_D1, 0);
+      double dayOpen  = iOpen(_Symbol, PERIOD_D1, 0);
+      double dayRange = dayHigh - dayLow;
       double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double curHull  = g_hullValueM1_Curr;
-      // ระยะห่างราคาตรง * 100 → 1 USD = 100 pts (ไม่ผ่าน Lot/tickVal)
-      double distPts  = (curHull > 0) ? MathAbs(curPrice - curHull) * 100.0 : 0;
+      double pctConsumed = (atrD1USD > 0) ? (dayRange / atrD1USD * 100.0) : 0;
+      double remaining   = MathMax(0, atrD1USD - dayRange);
+      double pricePos    = (dayRange > 0) ? ((curPrice - dayLow) / dayRange * 100.0) : 0;
+      string dayDir      = (dayOpen > 0 && curPrice >= dayOpen) ? "↑" : "↓";
+      double slope = g_hullSlopeM15;
+      int    eqlSt = g_eql_streak, eqhSt = g_eqh_streak;
 
-      double currentLimit = (double)InpMaxHullDistM1;
-      if(InpUseDynamicATR) {
-         double atrPrice = 0;
-         double buf[1];
-         if(CopyBuffer(g_atrHandle, 0, 0, 1, buf) > 0) atrPrice = buf[0];
-         if(atrPrice > 0) currentLimit = (atrPrice * 100.0) * InpATRMultiplier;
+      string condTxt; color condClr;
+      if(atrD1USD > 50 && slope > 0.05 && eqlSt >= 3)                     { condTxt = "▲ STRONG BULL"; condClr = clrLime;   }
+      else if(atrD1USD < 25 && MathAbs(slope) < 0.02 && !eqlSt && !eqhSt){ condTxt = "── RANGING";    condClr = clrGold;   }
+      else if(atrD1USD > 50 && slope < -0.05 && eqhSt >= 3)               { condTxt = "▼ STRONG BEAR"; condClr = clrTomato; }
+      else                                                                   { condTxt = "~ WEAK";        condClr = clrOrange; }
+      ObjectSetString (0, DASH_PREFIX+"EA_MKTCOND", OBJPROP_TEXT,
+                       StringFormat("MktCond: %s  ATR:$%.0f  Slp:%+.3f  EQL:%d",
+                                    condTxt, atrD1USD, slope, eqlSt));
+      ObjectSetInteger(0, DASH_PREFIX+"EA_MKTCOND", OBJPROP_COLOR, condClr);
+
+      string riskLbl; color runClr;
+      if(pctConsumed < 40)      { riskLbl = "EARLY"; runClr = clrLime;   }
+      else if(pctConsumed < 70) { riskLbl = "MID";   runClr = clrGold;   }
+      else                      { riskLbl = "LATE";  runClr = clrTomato; }
+      ObjectSetString (0, DASH_PREFIX+"EA_DAYRUN", OBJPROP_TEXT,
+                       StringFormat("DayRun : %s $%.0f/$%.0f (%.0f%%) Left:$%.0f  Pos:%.0f%%  [%s]",
+                                    dayDir, dayRange, atrD1USD, pctConsumed, remaining, pricePos, riskLbl));
+      ObjectSetInteger(0, DASH_PREFIX+"EA_DAYRUN", OBJPROP_COLOR, runClr);
+   }
+
+   // ─── Debug Panel ───
+   if(InpShowDash_Debug) {
+      // Hull M1 Value Prev/Curr
+      {
+         string slopeDir; color slopeClr;
+         if     (g_hullValueM1_Curr > g_hullValueM1_Prev) { slopeDir = "UP ▲";   slopeClr = clrSpringGreen; }
+         else if(g_hullValueM1_Curr < g_hullValueM1_Prev) { slopeDir = "DN ▼";   slopeClr = clrOrangeRed;   }
+         else                                               { slopeDir = "FLAT ─"; slopeClr = clrSilver;      }
+         ObjectSetString (0, DASH_PREFIX+"EA_M1SLOPE", OBJPROP_TEXT,
+                          StringFormat("Hull M1  Prev:%.2f  Curr:%.2f  [%s]",
+                                       g_hullValueM1_Prev, g_hullValueM1_Curr, slopeDir));
+         ObjectSetInteger(0, DASH_PREFIX+"EA_M1SLOPE", OBJPROP_COLOR, slopeClr);
       }
-
-      bool   tooFar  = (InpMaxHullDistM1 > 0 && distPts > currentLimit);
-      string gapTxt  = StringFormat("Hull M1 Gap: %.1f pts  (Limit: %.0f)  [%s]",
-                                    distPts, currentLimit, tooFar ? "⚠️ TOO FAR" : "✅ OK");
-      color  gapClr  = tooFar ? clrTomato : clrSpringGreen;
-      ObjectSetString (0, DASH_PREFIX+"EA_HULL_GAP", OBJPROP_TEXT,  gapTxt);
-      ObjectSetInteger(0, DASH_PREFIX+"EA_HULL_GAP", OBJPROP_COLOR, gapClr);
+      // Hull M1 Gap
+      {
+         double cp       = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double distPts  = (g_hullValueM1_Curr > 0) ? MathAbs(cp - g_hullValueM1_Curr) * 100.0 : 0;
+         double lim      = (double)InpMaxHullDistM1;
+         if(InpUseDynamicATR) {
+            double buf[1];
+            if(CopyBuffer(g_atrHandle,0,0,1,buf)>0 && buf[0]>0)
+               lim = buf[0] * 100.0 * InpATRMultiplier;
+         }
+         bool   tooFar = (InpMaxHullDistM1 > 0 && distPts > lim);
+         ObjectSetString (0, DASH_PREFIX+"EA_HULL_GAP", OBJPROP_TEXT,
+                          StringFormat("Hull M1 Gap: %.1fpts  (Lim:%.0f)  [%s]",
+                                       distPts, lim, tooFar?"TOO FAR":"OK"));
+         ObjectSetInteger(0, DASH_PREFIX+"EA_HULL_GAP", OBJPROP_COLOR, tooFar?clrTomato:clrSpringGreen);
+      }
    }
 
    UpdateWhatNextDashboard();
