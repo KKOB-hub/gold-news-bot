@@ -4,11 +4,19 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.10"
+#property version     "2.18"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.15 | 2026-05-07 | Absorption Visual: DetectAndDrawABS() — BOX+dotted line, new-bar only, MaxCount guard, on/off input
+// v2.17 | 2026-05-07 | ABS Detection: deltaProxy (close/range) replaces mid-proxy; mutual exclusive Bear/Bull; wick-only trigger
+// v2.18 | 2026-05-07 | Hull Trail: add SYMBOL_TRADE_STOPS_LEVEL guard (+10pt buffer) before SL modify to prevent "close to market" rejection
+// v2.16 | 2026-05-07 | ABS Arrow: OBJ_ARROW (▼Bull/▲Bear) at low-20pt/high+20pt, prefix DLZ_ABS_ARR_, evict with box
+// v2.14 | 2026-05-07 | EOD Push: OnTimer 23:58 → single-line daily summary (PnL/W-L/WinRate/Best/Worst/DD USD)
+// v2.13 | 2026-05-07 | NotifyOrderClose: single-line format (like Open), closeReason mapping MANUAL/MANUAL_APP/MANUAL_WEB/EA_CLOSE/UNKNOWN
+// v2.12 | 2026-05-07 | DayRun fix: ATR unit corrected (atrBuf[0] directly, no tickVal conversion)
+// v2.11 | 2026-05-07 | DayRun fix: ATR D1 unit bug (÷10 → tickVal/tickSize), arrow "↑/↓" → "UP/DN"
 // v2.10 | 2026-05-07 | FindZoneTP fix: loop tracking bug, dynamic buffer (min $0.30/ATR×10%), min floor 50% of InpTP_USD at all 10 call sites
 // v2.09 | 2026-05-06 | Dashboard redesign: 4-panel layout, per-panel toggles, Entry Modes strip, Version header, Retrace%, DirectEntry warning
 // v2.08 | 2026-05-06 | Dashboard: MktCond + DayRun display (Strong Bull/Ranging/Weak + ATR consumed %, remaining, price position)
@@ -43,10 +51,13 @@
 #include <Trade\Trade.mqh>
 
 //--- Object name prefix (used for bulk cleanup)
-#define OBJ_PREFIX "DLZ_"
+#define OBJ_PREFIX  "DLZ_"
 #define DASH_PREFIX "DLZ_DASH_" // สำหรับ Dashboard
 #define DASH_W      430          // Dashboard panel width (px)
-#define EA_VERSION  "2.10"       // EA version string (sync with #property version)
+#define EA_VERSION  "2.18"       // EA version string (sync with #property version)
+#define ABS_BOX_PFX "DLZ_ABS_BOX_"
+#define ABS_ARR_PFX "DLZ_ABS_ARR_"
+#define ABS_LIN_PFX "DLZ_ABS_LIN_"
 
 //+------------------------------------------------------------------+
 //|  INPUTS                                                          |
@@ -389,6 +400,15 @@ input double InpFVG_MinSize     = 50.0;           // Min FVG size (Points) — f
 input double InpFVG_BodyRatio   = 60.0;           // Min impulse body ratio % (0=disabled)
 input bool   InpFVG_ATRFilter   = true;           // Require impulse candle >= 1.5x ATR
 
+input group           "=== Absorption Visual ==="
+input bool   InpABS_Show      = true;          // Show Absorption boxes/lines
+input double InpABS_VolMult   = 1.5;           // High-vol threshold (×Avg20)
+input double InpABS_WickRatio = 0.4;           // Min wick/range ratio (0.4 = 40%)
+input color  InpABS_BullColor = clrLime;       // Bull ABS color (seller absorbed)
+input color  InpABS_BearColor = clrRed;        // Bear ABS color (buyer absorbed)
+input int    InpABS_LookBack  = 200;           // Bars to scan back
+input int    InpABS_MaxCount  = 30;            // Max ABS objects on chart
+
 input group           "=== Session VP Monitor ==="
 input bool   InpVpSession          = true;    // Show Session VP (Asia/London/NY)
 input int    InpVpRowSize          = 100;     // VP rows (ยิ่งมาก ยิ่ง precise)
@@ -589,7 +609,7 @@ void CheckEQHConfirmation();
 void LogTradeOpen(ulong ticket, string reason, double reqPrice);
 void ManageSLExpansion();
 void ManageAutoPending();
-void NotifyOrderClose(ulong ticket, string closeReason, string openReason, double pnl, int durMin, double maxDD);
+void NotifyOrderClose(ulong ticket, string sType, string closeReason, string openReason, double pnl, int durMin, double maxDD, double entryPrice, double closePrice, string icon);
 void UpdateWhatNextDashboard();
 
 struct TradeTrack {
@@ -835,6 +855,12 @@ datetime g_dlzLastBOSTime   = 0;
 double   g_dlzLastCHoChPrice= 0;
 bool     g_dlzLastWasCHoCH  = false;
 
+// Daily Summary Push
+struct DailyStats { int wins, losses; double netPnL, bestTrade, worstTrade, maxDD, balanceOpen; };
+DailyStats g_dailyStats;
+bool       g_eodSent      = false;  // guard ส่งครั้งเดียวต่อวัน
+datetime   g_statsDay     = 0;      // วันที่ reset stats
+
 // VWAP
 datetime  g_vwapDay       = 0;  // วันที่คำนวณ VWAP อยู่ (00:00 GMT)
 double    g_vwapCumTPV    = 0;  // Cumulative (TP × Volume)
@@ -996,6 +1022,127 @@ void DLZ_UpdateStructure()
          g_dlzBias           = 0;
          DLZ_CreateStructObj(lastLow.time, lastLow.price, "CHoCH ↓", InpBOS_ChochColor);
       }
+   }
+}
+
+//+------------------------------------------------------------------+
+//|  VISUAL: Absorption Detection & Draw                             |
+//+------------------------------------------------------------------+
+void DrawAbsorptionObject(double top, double bottom, color clr, datetime t, bool isBear)
+{
+   string boxN  = ABS_BOX_PFX + TimeToString(t);
+   string lineN = ABS_LIN_PFX + TimeToString(t);
+   if(ObjectFind(0, boxN) >= 0) return; // already drawn
+
+   ObjectCreate(0, boxN, OBJ_RECTANGLE, 0, t, top, (datetime)(t + PeriodSeconds()), bottom);
+   ObjectSetInteger(0, boxN, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, boxN, OBJPROP_FILL,       false);
+   ObjectSetInteger(0, boxN, OBJPROP_WIDTH,       2);
+   ObjectSetInteger(0, boxN, OBJPROP_BACK,        true);
+   ObjectSetInteger(0, boxN, OBJPROP_SELECTABLE,  false);
+
+   double lvl = isBear ? top : bottom;
+   ObjectCreate(0, lineN, OBJ_TREND, 0, t, lvl, TimeCurrent(), lvl);
+   ObjectSetInteger(0, lineN, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, lineN, OBJPROP_STYLE,      STYLE_DOT);
+   ObjectSetInteger(0, lineN, OBJPROP_WIDTH,       1);
+   ObjectSetInteger(0, lineN, OBJPROP_RAY_RIGHT,  false);
+   ObjectSetInteger(0, lineN, OBJPROP_BACK,        true);
+   ObjectSetInteger(0, lineN, OBJPROP_SELECTABLE,  false);
+
+   // Arrow: Bear=▲ above bar, Bull=▼ below bar (same logic as Deeporderflow BufferBearAbs/BufferBullAbs)
+   string arrN   = ABS_ARR_PFX + TimeToString(t);
+   double arrPrc = isBear ? (top + _Point * 20) : (bottom - _Point * 20);
+   int    arrCode = isBear ? 234 : 233;
+   ObjectCreate(0, arrN, OBJ_ARROW, 0, t, arrPrc);
+   ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE,  arrCode);
+   ObjectSetInteger(0, arrN, OBJPROP_COLOR,       clr);
+   ObjectSetInteger(0, arrN, OBJPROP_WIDTH,        2);
+   ObjectSetInteger(0, arrN, OBJPROP_BACK,         false);
+   ObjectSetInteger(0, arrN, OBJPROP_SELECTABLE,   false);
+}
+
+void DetectAndDrawABS()
+{
+   if(!InpABS_Show) return;
+
+   // ลบ object เก่าเกิน MaxCount (นับจากซ้ายสุด)
+   int boxCount = 0;
+   for(int j = ObjectsTotal(0) - 1; j >= 0; j--)
+   {
+      string nm = ObjectName(0, j);
+      if(StringFind(nm, ABS_BOX_PFX) == 0) boxCount++;
+   }
+   // ถ้าเกิน MaxCount ลบออกจนเหลือ MaxCount-1 ก่อนเพิ่มใหม่
+   while(boxCount >= InpABS_MaxCount)
+   {
+      datetime oldest = TimeCurrent();
+      string   oldNm  = "";
+      for(int j = 0; j < ObjectsTotal(0); j++)
+      {
+         string nm = ObjectName(0, j);
+         if(StringFind(nm, ABS_BOX_PFX) == 0)
+         {
+            datetime t = (datetime)ObjectGetInteger(0, nm, OBJPROP_TIME, 0);
+            if(t < oldest) { oldest = t; oldNm = nm; }
+         }
+      }
+      if(oldNm == "") break;
+      string suffix = StringSubstr(oldNm, StringLen(ABS_BOX_PFX));
+      ObjectDelete(0, oldNm);
+      ObjectDelete(0, ABS_LIN_PFX + suffix);
+      ObjectDelete(0, ABS_ARR_PFX + suffix);
+      boxCount--;
+   }
+
+   int scanBars = MathMin(InpABS_LookBack, Bars(_Symbol, _Period) - 22);
+   if(scanBars < 1) return;
+
+   double hi[], lo[], op[], cl[];
+   long   vol[];
+   datetime tm[];
+   ArraySetAsSeries(hi,  true); ArraySetAsSeries(lo,  true);
+   ArraySetAsSeries(op,  true); ArraySetAsSeries(cl,  true);
+   ArraySetAsSeries(vol, true); ArraySetAsSeries(tm,  true);
+
+   int copied = CopyHigh(_Symbol, _Period, 0, scanBars + 22, hi);
+   if(copied < 22) return;
+   CopyLow(_Symbol,   _Period, 0, scanBars + 22, lo);
+   CopyOpen(_Symbol,  _Period, 0, scanBars + 22, op);
+   CopyClose(_Symbol, _Period, 0, scanBars + 22, cl);
+   CopyTickVolume(_Symbol, _Period, 0, scanBars + 22, vol);
+   CopyTime(_Symbol,  _Period, 0, scanBars + 22, tm);
+
+   for(int i = 1; i <= scanBars; i++)
+   {
+      if(i + 20 >= ArraySize(hi)) continue;
+
+      // avgVol จาก 20 bars ก่อนหน้า
+      double avgVol = 0;
+      for(int k = 1; k <= 20; k++) avgVol += (double)vol[i + k];
+      avgVol /= 20.0;
+      if(avgVol <= 0) avgVol = 1;
+
+      double v      = (double)vol[i];
+      double range  = hi[i] - lo[i];
+      double wickT  = hi[i] - MathMax(op[i], cl[i]);
+      double wickB  = MathMin(op[i], cl[i]) - lo[i];
+      bool   hiVol  = (v > avgVol * InpABS_VolMult);
+
+      // ต้องมี bar ข้างหน้าแล้ว (i >= 1) และ object ยังไม่มี
+      string boxChk = ABS_BOX_PFX + TimeToString(tm[i]);
+      if(ObjectFind(0, boxChk) >= 0) continue;
+
+      // delta proxy: close position ใน range (>0.5 = buy pressure, <0.5 = sell pressure)
+      double deltaProxy = (range > 0) ? (cl[i] - lo[i]) / range : 0.5;
+
+      // Bear ABS: buy pressure absorbed (deltaProxy>0.5) แต่ wick บนเด่น → supply ดูด
+      if(hiVol && deltaProxy > 0.5 && range > 0 && wickT > range * InpABS_WickRatio)
+         DrawAbsorptionObject(hi[i], hi[i] - wickT, InpABS_BearColor, tm[i], true);
+
+      // Bull ABS: sell pressure absorbed (deltaProxy<0.5) แต่ wick ล่างเด่น → demand ดูด
+      if(hiVol && deltaProxy < 0.5 && range > 0 && wickB > range * InpABS_WickRatio)
+         DrawAbsorptionObject(lo[i] + wickB, lo[i], InpABS_BullColor, tm[i], false);
    }
 }
 
@@ -3600,6 +3747,11 @@ void CleanupM15Candles() {
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   EventSetTimer(60);  // OnTimer ทุก 1 นาที (EOD summary)
+   ZeroMemory(g_dailyStats);
+   g_dailyStats.balanceOpen = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_statsDay  = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   g_eodSent   = false;
    ArrayResize(g_zones_htf, 0);
    ArrayResize(g_histHighs_htf, 0);
    ArrayResize(g_histLows_htf, 0);
@@ -3851,6 +4003,7 @@ void OnDeinit(const int reason)
    ObjectsDeleteAll(0, "MID_DLZ_FVG_");
    ArrayFree(g_fvgList);
    g_fvgCount = 0;
+   EventKillTimer();
 }
 
 //+------------------------------------------------------------------+
@@ -4727,6 +4880,8 @@ void OnTick()
      if(_curBar != _fvgLastBar) { _fvgLastBar = _curBar; DLZ_DetectFVG(); } }
    DLZ_CheckFVGFill();
    DLZ_DrawFVGObjects();
+   { static datetime _absLastBar = 0; datetime _curBar = time_arr[rates_total-1];
+     if(_curBar != _absLastBar) { _absLastBar = _curBar; DetectAndDrawABS(); } }
    MonitorSessionVP();
 
    // ATR Previous Day Levels — redraw on new day (wait until handle is ready)
@@ -6608,7 +6763,7 @@ void UpdateEADashboard()
    {
       double atrBuf[1]; double atrD1USD = 0;
       if(g_atr_d1_handle != INVALID_HANDLE && CopyBuffer(g_atr_d1_handle,0,0,1,atrBuf)==1)
-         atrD1USD = atrBuf[0] / 10.0;
+         atrD1USD = atrBuf[0]; // Price units = same scale as dayRange; Gold 1pt~=$1
 
       double dayHigh  = iHigh(_Symbol, PERIOD_D1, 0);
       double dayLow   = iLow (_Symbol, PERIOD_D1, 0);
@@ -6618,7 +6773,7 @@ void UpdateEADashboard()
       double pctConsumed = (atrD1USD > 0) ? (dayRange / atrD1USD * 100.0) : 0;
       double remaining   = MathMax(0, atrD1USD - dayRange);
       double pricePos    = (dayRange > 0) ? ((curPrice - dayLow) / dayRange * 100.0) : 0;
-      string dayDir      = (dayOpen > 0 && curPrice >= dayOpen) ? "↑" : "↓";
+      string dayDir      = (dayOpen > 0 && curPrice >= dayOpen) ? "UP" : "DN";
       double slope = g_hullSlopeM15;
       int    eqlSt = g_eql_streak, eqhSt = g_eqh_streak;
 
@@ -6872,15 +7027,19 @@ void LogTradeOpen(ulong ticket, string reason, double reqPrice)
 //+------------------------------------------------------------------+
 //|  EA: NotifyOrderClose — Print + Notify เมื่อปิด Order            |
 //+------------------------------------------------------------------+
-void NotifyOrderClose(ulong ticket, string closeReason, string openReason, double pnl, int durMin, double maxDD)
+void NotifyOrderClose(ulong ticket, string sType, string closeReason, string openReason,
+                      double pnl, int durMin, double maxDD, double entryPrice, double closePrice, string icon)
 {
-   string icon = (StringFind(closeReason,"TP")>=0) ? "✅" :
-                 (StringFind(closeReason,"BE")>=0) ? "🔒" : "❌";
-   string reason_full = StringFormat("%s (OpenBy:%s)", closeReason, openReason);
-   string msg = StringFormat("[DLZ Order] %s [%s] PnL:%+.2f USD | %dmin MaxDD:-$%.2f",
-                              icon, reason_full, pnl, durMin, maxDD);
+   string msg = StringFormat("[DLZ Order] %s CLOSE %s #%d @ %.3f | Entry:%.3f PnL:%+.2f | OpenBy:%s → CloseBy:%s | Dur:%dmin MaxDD:-$%.2f",
+                              icon, sType, ticket, closePrice, entryPrice, pnl, openReason, closeReason, durMin, maxDD);
    Print(msg);
-   if(InpNotifyOrder && InpAlertPush) SafeSendNotification(msg);
+   if(InpNotifyOrder && InpAlertPush)
+   {
+      string notif = StringFormat("%s CLOSE %s @ %.3f | PnL:%+.2f | OpenBy:%s → CloseBy:%s | Dur:%dmin",
+                                  icon, sType, closePrice, pnl, openReason, closeReason, durMin);
+      SafeSendNotification(notif);
+   }
+   UpdateDailyStats(pnl, maxDD);  // สะสม EOD stats
 }
 
 //+------------------------------------------------------------------+
@@ -7293,17 +7452,19 @@ void ManageHullTrail()
       double profitUSD   = profitPts / _Point * ptValue * lots;
       if(profitUSD < InpBE_TriggerUSD) continue;
 
-      // ── B: Trail SL → Hull[bars] (ทิศเดียว + guard) ──────────────
+      // ── B: Trail SL → Hull[bars] (ทิศเดียว + guard + min stop dist) ──
+      long   _stopLvl  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      double _minStop  = (_stopLvl + 10) * _Point; // +10pt buffer กัน edge case
       if(posType == POSITION_TYPE_BUY)
       {
-         if(hullSL > curSL           // เลื่อนขึ้นเท่านั้น (ratchet)
-            && hullSL < curPrice)    // ต่ำกว่าราคาปัจจุบัน
+         if(hullSL > curSL                    // เลื่อนขึ้นเท่านั้น (ratchet)
+            && hullSL < curPrice - _minStop)  // ห่างจากราคาเกิน min stop
             newSL = hullSL;
       }
       else // SELL
       {
-         if(hullSL < curSL           // เลื่อนลงเท่านั้น (ratchet)
-            && hullSL > curPrice)    // สูงกว่าราคาปัจจุบัน
+         if(hullSL < curSL                    // เลื่อนลงเท่านั้น (ratchet)
+            && hullSL > curPrice + _minStop)  // ห่างจากราคาเกิน min stop
             newSL = hullSL;
       }
 
@@ -7427,14 +7588,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    string openReason  = (idx >= 0) ? g_trackList[idx].reason : "Unknown";
    string closeReason;
-   if(reason == DEAL_REASON_TP)     closeReason = "TP";
+   if(reason == DEAL_REASON_TP)          closeReason = "TP";
    else if(reason == DEAL_REASON_SL)
       closeReason = (idx >= 0 && g_trackList[idx].beTriggered) ? "BE" : "SL";
-   else                             closeReason = "CLOSE_ALL";
+   else if(reason == DEAL_REASON_CLIENT) closeReason = "MANUAL";
+   else if(reason == DEAL_REASON_MOBILE) closeReason = "MANUAL_APP";
+   else if(reason == DEAL_REASON_WEB)    closeReason = "MANUAL_WEB";
+   else if(reason == DEAL_REASON_EXPERT) closeReason = "EA_CLOSE";
+   else                                  closeReason = "UNKNOWN";
 
-   NotifyOrderClose(posId, closeReason, openReason, pnl, durMin, maxDD);
-   Print(StringFormat("[DLZ Order] CLOSE #%d [%s→%s] PnL:%+.2f | Entry:%.3f | Dur:%dmin | MaxDD:-$%.2f",
-                      posId, openReason, closeReason, pnl, openPrice, durMin, maxDD));
+   long   dealType  = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+   string sType     = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";
+   double closePrice= HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+   string icon      = (closeReason == "TP") ? "✅" : (closeReason == "BE") ? "🔒" : "❌";
+
+   NotifyOrderClose(posId, sType, closeReason, openReason, pnl, durMin, maxDD, openPrice, closePrice, icon);
 
    if(idx >= 0) RemoveTrack(idx);
 }
@@ -7837,4 +8005,67 @@ void CheckRetryNotification()
    bool ok = SendNotification(msg);
    if(!ok) Print("[DLZ Push] Retry failed (err=", GetLastError(), "): ", msg);
    else    Print("[DLZ Push] Retry OK: ", msg);
+}
+
+//+------------------------------------------------------------------+
+//|  Daily Stats: reset เมื่อขึ้นวันใหม่                             |
+//+------------------------------------------------------------------+
+void ResetDailyStatsIfNewDay()
+{
+   datetime todayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   if(todayStart != g_statsDay)
+   {
+      ZeroMemory(g_dailyStats);
+      g_dailyStats.balanceOpen = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_statsDay  = todayStart;
+      g_eodSent   = false;
+   }
+}
+
+//--- เรียกหลัง order ปิดทุกครั้ง เพื่อสะสม stats วันนี้
+void UpdateDailyStats(double pnl, double tradeDD)
+{
+   ResetDailyStatsIfNewDay();
+   g_dailyStats.netPnL += pnl;
+   if(pnl > 0) g_dailyStats.wins++;
+   else        g_dailyStats.losses++;
+   if(pnl > g_dailyStats.bestTrade)  g_dailyStats.bestTrade  = pnl;
+   if(pnl < g_dailyStats.worstTrade) g_dailyStats.worstTrade = pnl;
+   if(tradeDD > g_dailyStats.maxDD)  g_dailyStats.maxDD      = tradeDD;
+}
+
+//+------------------------------------------------------------------+
+//|  OnTimer: ตรวจ 23:58 server time → ส่ง EOD push                 |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   CheckRetryNotification();
+   ResetDailyStatsIfNewDay();
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.hour != 23 || dt.min != 58) return;
+   if(g_eodSent) return;
+
+   int total = g_dailyStats.wins + g_dailyStats.losses;
+   if(total == 0) { g_eodSent = true; return; }  // ไม่มีเทรด ไม่ส่ง
+
+   double balOpen  = (g_dailyStats.balanceOpen > 0) ? g_dailyStats.balanceOpen : AccountInfoDouble(ACCOUNT_BALANCE);
+   double pnlPct   = (balOpen > 0) ? g_dailyStats.netPnL / balOpen * 100.0 : 0;
+   int    winRate  = (int)MathRound((double)g_dailyStats.wins / total * 100.0);
+   string sign     = (g_dailyStats.netPnL >= 0) ? "+" : "";
+
+   string msg = StringFormat(
+      "📊 XAUUSD | %s$%.2f (%s%.1f%%) | %dW %dL (%d%%) | Best %s$%.2f Worst $%.2f | DD $%.2f",
+      sign, g_dailyStats.netPnL,
+      sign, pnlPct,
+      g_dailyStats.wins, g_dailyStats.losses, winRate,
+      (g_dailyStats.bestTrade >= 0 ? "+" : ""), g_dailyStats.bestTrade,
+      g_dailyStats.worstTrade,
+      g_dailyStats.maxDD
+   );
+
+   SafeSendNotification(msg);
+   Print("[DLZ EOD] ", msg);
+   g_eodSent = true;
 }
