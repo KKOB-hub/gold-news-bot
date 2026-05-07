@@ -4,11 +4,12 @@
 //|  Signal: EQL→BUY, EQH(streak>=3)→SELL                           |
 //+------------------------------------------------------------------+
 #property copyright   "DLZ EA"
-#property version     "2.09"
+#property version     "2.10"
 #property description "DLZ EA -- Auto trading on EQH/EQL zones"
 //+------------------------------------------------------------------+
 //|  RELEASE NOTES                                                   |
 //+------------------------------------------------------------------+
+// v2.10 | 2026-05-07 | FindZoneTP fix: loop tracking bug, dynamic buffer (min $0.30/ATR×10%), min floor 50% of InpTP_USD at all 10 call sites
 // v2.09 | 2026-05-06 | Dashboard redesign: 4-panel layout, per-panel toggles, Entry Modes strip, Version header, Retrace%, DirectEntry warning
 // v2.08 | 2026-05-06 | Dashboard: MktCond + DayRun display (Strong Bull/Ranging/Weak + ATR consumed %, remaining, price position)
 // v2.07 | 2026-05-05 | NR Mode4 SELL: hard Fibo zone check always active (block >85% or <38.2% regardless of swingCount/InpFiboFilter)
@@ -45,7 +46,7 @@
 #define OBJ_PREFIX "DLZ_"
 #define DASH_PREFIX "DLZ_DASH_" // สำหรับ Dashboard
 #define DASH_W      430          // Dashboard panel width (px)
-#define EA_VERSION  "2.09"       // EA version string (sync with #property version)
+#define EA_VERSION  "2.10"       // EA version string (sync with #property version)
 
 //+------------------------------------------------------------------+
 //|  INPUTS                                                          |
@@ -3685,7 +3686,7 @@ if(InpShowDash) {
    if(InpShowDash_Signal) {
       DashMakePanel(DASH_PREFIX+"BG_A", InpDashY, 52, C'15,15,35');
       int ya = InpDashY + 6;
-      CreateDashLabel(DASH_PREFIX+"A_HDR",    ya,    "DLZ_EA V.2.09 | -- | --",  clrAqua,   9, true);
+      CreateDashLabel(DASH_PREFIX+"A_HDR",    ya,    "DLZ_EA V.2.10 | -- | --",  clrAqua,   9, true);
       CreateDashLabel(DASH_PREFIX+"A_STATUS", ya+16, "Session: -- | --",          clrSilver, 9);
       CreateDashLabel(DASH_PREFIX+"A_EMA",    ya+30, "EMA: --",                   clrSilver, 9);
    }
@@ -4150,8 +4151,9 @@ void CheckNRArrowEntry(int dir, datetime barTime, double barHigh, double barLow)
       double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double slGap  = CalcSLGap(ask, true);
       double fixedTP= ask + tpGap;
+      double minTP  = ask + USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP = FindZoneTP_Buy(ask);
-      double tp     = (zoneTP > ask && zoneTP < fixedTP) ? zoneTP : fixedTP;
+      double tp     = (zoneTP > minTP && zoneTP < fixedTP) ? zoneTP : fixedTP;
       double sl     = ask - slGap;
       if(MathAbs(tp - ask) < minDist) tp = ask + minDist;
       if(MathAbs(ask - sl) < minDist) sl = ask - minDist;
@@ -4186,8 +4188,9 @@ void CheckNRArrowEntry(int dir, datetime barTime, double barHigh, double barLow)
       double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double slGap  = CalcSLGap(bid, false);
       double fixedTP= bid - tpGap;
+      double minTP  = bid - USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP = FindZoneTP_Sell(bid);
-      double tp     = (zoneTP < bid && zoneTP > fixedTP) ? zoneTP : fixedTP;
+      double tp     = (zoneTP < minTP && zoneTP > fixedTP) ? zoneTP : fixedTP;
       double sl     = bid + slGap;
       if(MathAbs(bid - tp) < minDist) tp = bid - minDist;
       if(MathAbs(sl - bid) < minDist) sl = bid + minDist;
@@ -5396,35 +5399,45 @@ double USDtoPriceGap(double usd)
 // คืนค่า TP price สำหรับ BUY (ใต้ EQH zone ที่ใกล้ที่สุด) หรือ 0 ถ้าไม่มี zone
 double FindZoneTP_Buy(double ask)
 {
-   double nearest = 0;
+   double nearestSweep  = 0;
+   double nearestBottom = 0;
    for(int i = 0; i < ArraySize(g_zones); i++)
    {
       if(g_zones[i].isSwept) continue;
       if(!g_zones[i].isHigh) continue;
-      if(g_zones[i].sweepLevel <= ask) continue;         // ต้องอยู่เหนือ ask
-      if(nearest == 0 || g_zones[i].sweepLevel < nearest)
-         nearest = g_zones[i].bottomPrice;               // ใช้ขอบล่างของ zone
+      if(g_zones[i].sweepLevel <= ask) continue;
+      if(nearestSweep == 0 || g_zones[i].sweepLevel < nearestSweep) {
+         nearestSweep  = g_zones[i].sweepLevel;
+         nearestBottom = g_zones[i].bottomPrice;
+      }
    }
-   if(nearest <= ask) return 0;
-   double buffer = USDtoPriceGap(1.0);                   // buffer $1 ใต้ zone bottom
-   return nearest - buffer;
+   if(nearestBottom <= ask || nearestBottom == 0) return 0;
+   double atr    = GetATR();
+   double buffer = (atr > 0) ? MathMin(USDtoPriceGap(0.30), USDtoPriceGap(atr * 0.10))
+                              : USDtoPriceGap(0.30);
+   return nearestBottom - buffer;
 }
 
 // คืนค่า TP price สำหรับ SELL (เหนือ EQL zone ที่ใกล้ที่สุด) หรือ 0 ถ้าไม่มี zone
 double FindZoneTP_Sell(double bid)
 {
-   double nearest = 0;
+   double nearestSweep = 0;
+   double nearestTop   = 0;
    for(int i = 0; i < ArraySize(g_zones); i++)
    {
       if(g_zones[i].isSwept) continue;
       if(g_zones[i].isHigh) continue;
-      if(g_zones[i].sweepLevel >= bid) continue;         // ต้องอยู่ใต้ bid
-      if(nearest == 0 || g_zones[i].sweepLevel > nearest)
-         nearest = g_zones[i].topPrice;                  // ใช้ขอบบนของ zone
+      if(g_zones[i].sweepLevel >= bid) continue;
+      if(nearestSweep == 0 || g_zones[i].sweepLevel > nearestSweep) {
+         nearestSweep = g_zones[i].sweepLevel;
+         nearestTop   = g_zones[i].topPrice;
+      }
    }
-   if(nearest >= bid || nearest <= 0) return 0;
-   double buffer = USDtoPriceGap(1.0);                   // buffer $1 เหนือ zone top
-   return nearest + buffer;
+   if(nearestTop >= bid || nearestTop <= 0) return 0;
+   double atr    = GetATR();
+   double buffer = (atr > 0) ? MathMin(USDtoPriceGap(0.30), USDtoPriceGap(atr * 0.10))
+                              : USDtoPriceGap(0.30);
+   return nearestTop + buffer;
 }
 
 //+------------------------------------------------------------------+
@@ -5556,8 +5569,9 @@ void CheckAndOpenOrder(const LiquidityZone &z)
 
       double slGap   = CalcSLGap(ask, true);
       double fixedTP = ask + tpGap;
+      double minTP   = ask + USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP  = FindZoneTP_Buy(ask);
-      double tp      = (zoneTP > ask && zoneTP < fixedTP) ? zoneTP : fixedTP;
+      double tp      = (zoneTP > minTP && zoneTP < fixedTP) ? zoneTP : fixedTP;
       double sl      = ask - slGap;
       if(MathAbs(tp - ask) < minDistance) tp = ask + minDistance;
       if(MathAbs(ask - sl) < minDistance) sl = ask - minDistance;
@@ -5672,8 +5686,9 @@ void CheckAndOpenOrder(const LiquidityZone &z)
 
       double slGap   = CalcSLGap(bid, false);
       double fixedTP = bid - tpGap;
+      double minTP   = bid - USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP  = FindZoneTP_Sell(bid);
-      double tp      = (zoneTP < bid && zoneTP > fixedTP) ? zoneTP : fixedTP;
+      double tp      = (zoneTP < minTP && zoneTP > fixedTP) ? zoneTP : fixedTP;
       double sl      = bid + slGap;
       if(MathAbs(bid - tp) < minDistance) tp = bid - minDistance;
       if(MathAbs(sl - bid) < minDistance) sl = bid + minDistance;
@@ -5810,8 +5825,9 @@ void CheckHullFollowEntry()
             if(buyOK) {
                double slGap   = CalcSLGap(ask, true);
                double fixedTP = ask + tpGap;
+               double minTP   = ask + USDtoPriceGap(InpTP_USD * 0.5);
                double zoneTP  = FindZoneTP_Buy(ask);
-               double tp      = (zoneTP > ask && zoneTP < fixedTP) ? zoneTP : fixedTP;
+               double tp      = (zoneTP > minTP && zoneTP < fixedTP) ? zoneTP : fixedTP;
                double sl      = ask - slGap;
                if(MathAbs(tp - ask) < minDistance) tp = ask + minDistance;
                if(MathAbs(ask - sl) < minDistance) sl = ask - minDistance;
@@ -5884,8 +5900,9 @@ void CheckHullFollowEntry()
       }
       double slGap   = CalcSLGap(bid, false);
       double fixedTP = bid - tpGap;
+      double minTP   = bid - USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP  = FindZoneTP_Sell(bid);
-      double tp      = (zoneTP < bid && zoneTP > fixedTP) ? zoneTP : fixedTP;
+      double tp      = (zoneTP < minTP && zoneTP > fixedTP) ? zoneTP : fixedTP;
       double sl      = bid + slGap;
       if(MathAbs(bid - tp) < minDistance) tp = bid - minDistance;
       if(MathAbs(sl - bid) < minDistance) sl = bid + minDistance;
@@ -5967,8 +5984,9 @@ void CheckClusterZoneFastEntry()
          // SL/TP เงื่อนไขกลาง (เหมือน CheckAndOpenOrder)
          double slGap  = CalcSLGap(ask, true);
          double fixedTP = ask + tpGap;
+         double minTP   = ask + USDtoPriceGap(InpTP_USD * 0.5);
          double zoneTP  = FindZoneTP_Buy(ask);
-         double tp = (zoneTP > ask && zoneTP < fixedTP) ? zoneTP : fixedTP;
+         double tp = (zoneTP > minTP && zoneTP < fixedTP) ? zoneTP : fixedTP;
          double sl = ask - slGap;
          if(MathAbs(tp  - ask) < minDist) tp = ask + minDist;
          if(MathAbs(ask - sl)  < minDist) sl = ask - minDist;
@@ -6038,8 +6056,9 @@ void CheckClusterZoneFastEntry()
          // SL/TP เงื่อนไขกลาง
          double slGap  = CalcSLGap(bid, false);
          double fixedTP = bid - tpGap;
+         double minTP   = bid - USDtoPriceGap(InpTP_USD * 0.5);
          double zoneTP  = FindZoneTP_Sell(bid);
-         double tp = (zoneTP < bid && zoneTP > fixedTP) ? zoneTP : fixedTP;
+         double tp = (zoneTP < minTP && zoneTP > fixedTP) ? zoneTP : fixedTP;
          double sl = bid + slGap;
          if(MathAbs(bid - tp) < minDist) tp = bid - minDist;
          if(MathAbs(sl  - bid) < minDist) sl = bid + minDist;
@@ -6937,8 +6956,9 @@ void CheckEQLConfirmation()
       double slGap = CalcSLGap(ask, true);
       double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 50) * _Point;
       double fixedTP = ask + tpGap;
+      double minTP   = ask + USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP  = FindZoneTP_Buy(ask);
-      double tp = (zoneTP > ask && zoneTP < fixedTP) ? zoneTP : fixedTP;
+      double tp = (zoneTP > minTP && zoneTP < fixedTP) ? zoneTP : fixedTP;
       double sl = ask - slGap;
       if(MathAbs(tp - ask) < minDist) tp = ask + minDist;
       if(MathAbs(ask - sl) < minDist) sl = ask - minDist;
@@ -7035,8 +7055,9 @@ void CheckEQHConfirmation()
       double slGap = CalcSLGap(bid, false);
       double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 50) * _Point;
       double fixedTP = bid - tpGap;
+      double minTP   = bid - USDtoPriceGap(InpTP_USD * 0.5);
       double zoneTP  = FindZoneTP_Sell(bid);
-      double tp = (zoneTP < bid && zoneTP > fixedTP) ? zoneTP : fixedTP;
+      double tp = (zoneTP < minTP && zoneTP > fixedTP) ? zoneTP : fixedTP;
       double sl = bid + slGap;
       if(MathAbs(bid - tp) < minDist) tp = bid - minDist;
       if(MathAbs(sl - bid) < minDist) sl = bid + minDist;
